@@ -6,7 +6,7 @@ REM Creates dist\ACMP\ACMP.exe. One-folder mode is more reliable for Qt WebEngin
 py -3.12 -m pip install -r requirements.txt pyinstaller
 if errorlevel 1 goto :error
 
-py -3.12 -m PyInstaller --noconfirm --clean --windowed --name ACMP --collect-all PySide6 main.py
+py -3.12 -m PyInstaller --noconfirm --clean --windowed --name ACMP --collect-all PySide6 --collect-all shapely main.py
 if errorlevel 1 goto :error
 
 echo.

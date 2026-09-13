@@ -8,17 +8,25 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from html import escape
 from pathlib import Path
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
-from PySide6.QtCore import QSettings, QUrl, Signal
+from PySide6.QtCore import QSettings, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEnginePermission
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFrame,
     QFileDialog,
@@ -31,10 +39,14 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QListWidget,
     QTextEdit,
+    QTextBrowser,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -66,12 +78,38 @@ UI_EN = {
     "Eigene Gradzahl": "Custom angle", "Optimal (längste Kante)": "Optimal (longest edge)", "Optimal (kürzeste Flugzeit)": "Optimal (shortest flight time)",
     "Standard (glatte Kurven)": "Standard (smooth curves)", "WPML gerade / Punktstopp (nicht garantiert)": "WPML straight / point stop (not guaranteed)",
     "Stützpunkte für geradere Bahnen": "Support points for straighter paths", "Foto bei jedem Wegpunkt": "Photo at every waypoint",
-    "Foto nach Distanzintervall": "Photo at distance interval", "Keine Aktion": "No action", "2 s schweben": "Hover 2 s",
+    "Foto nach Distanzintervall": "Photo at distance interval", "Keine Aktion": "No action", "2 s schweben": "Hover 2 s", "Was ist hier?": "What's here?",
+    "Konflikte …": "Conflicts …",
+    "UAS-Geozonen": "UAS geozones", "UAS-Geozonen (Deutschland)": "UAS geozones (Germany)",
     "Maximal ausnutzen": "Use maximum", "Gleichmäßig verteilen": "Distribute evenly",
     "Rückkehr zum Startpunkt (Home)": "Return to home", "Schweben am letzten Wegpunkt": "Hover at last waypoint",
     "Landen am letzten Wegpunkt": "Land at last waypoint", "Zum ersten Wegpunkt": "Go to first waypoint", "Schweben": "Hover", "Landen": "Land",
 }
 UI_DE = {english: german for german, english in UI_EN.items()}
+
+
+# Die Namen entsprechen den Layern des öffentlichen dipul/DFS-WMS.  Die
+# Abfrage ist absichtlich nur ein Hinweis: WMS GetFeatureInfo liefert keine
+# rechtsverbindliche Freigabe und kann bei kleinen Zonen Treffer übersehen.
+GEOZONE_LAYERS = (
+    "bahnanlagen,behoerden,bundesautobahnen,bundesstrassen,ffh-gebiete,"
+    "flugbeschraenkungsgebiete,flughaefen,flugplaetze,industrieanlagen,"
+    "kontrollzonen,krankenhaeuser,militaerische_anlagen,nationalparks,"
+    "naturschutzgebiete,polizei,temporaere_betriebseinschraenkungen,"
+    "vogelschutzgebiete,wohngrundstuecke"
+)
+from shapely.geometry import Polygon, shape, mapping
+GEOZONE_LABELS = {
+    "bahnanlagen": "Bahnanlagen", "behoerden": "Behörden",
+    "bundesautobahnen": "Bundesautobahnen", "bundesstrassen": "Bundesstraßen",
+    "ffh-gebiete": "FFH-Gebiete", "flugbeschraenkungsgebiete": "Flugbeschränkungsgebiete",
+    "flughaefen": "Flughäfen", "flugplaetze": "Flugplätze",
+    "industrieanlagen": "Industrieanlagen", "kontrollzonen": "Kontrollzonen",
+    "krankenhaeuser": "Krankenhäuser", "militaerische_anlagen": "Militärische Anlagen",
+    "nationalparks": "Nationalparks", "naturschutzgebiete": "Naturschutzgebiete",
+    "polizei": "Polizei", "temporaere_betriebseinschraenkungen": "Temporäre Betriebseinschränkungen",
+    "vogelschutzgebiete": "Vogelschutzgebiete", "wohngrundstuecke": "Wohngrundstücke",
+}
 
 
 def canonical_ui_text(value: str) -> str:
@@ -87,11 +125,17 @@ MAP_HTML = r"""<!DOCTYPE html>
 <script>
 const normal = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 20, attribution:'© OpenStreetMap-Mitwirkende'});
 const satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom: 19, attribution:'Tiles © Esri'});
+const geozones = L.tileLayer.wms('https://uas-betrieb.de/geoservices/dipul/wms?', {
+  layers:'bahnanlagen,behoerden,bundesautobahnen,bundesstrassen,ffh-gebiete,flugbeschraenkungsgebiete,flughaefen,flugplaetze,industrieanlagen,kontrollzonen,krankenhaeuser,militaerische_anlagen,nationalparks,naturschutzgebiete,polizei,temporaere_betriebseinschraenkungen,vogelschutzgebiete,wohngrundstuecke',
+  format:'image/png',transparent:true,version:'1.3.0',opacity:.85,attribution:'© DFS/dipul'
+});
 const map = L.map('map', {zoomControl:true, layers:[normal]}).setView([51.1657, 10.4515], 6);
 L.control.layers({'Karte':normal, 'Satellit':satellite}, null, {position:'topleft'}).addTo(map);
+L.control.scale({position:'bottomleft', metric:true, imperial:false, maxWidth:140}).addTo(map);
 let points = [], polygon = null, preview = null, shapePreview = null, shapeStart = null, markers = [], drawMode = 'none';
 let noFlyZones = [], activeNoFly = [], noFlyLayer = L.layerGroup().addTo(map);
 let missionLayer = L.layerGroup().addTo(map);
+let geozoneConflictLayer = L.layerGroup().addTo(map);
 function emit(){ console.log('ACMP_POLYGON:' + JSON.stringify(points)); }
 function emitNoFly(){ console.log('ACMP_NO_FLY:' + JSON.stringify(noFlyZones)); }
 function clearVisuals(){
@@ -114,7 +158,9 @@ function redrawNoFly(){
 map.on('click', e=>{
   if(drawMode==='area'){ points.push([e.latlng.lat,e.latlng.lng]); redraw(); }
   if(drawMode==='nofly'){ activeNoFly.push([e.latlng.lat,e.latlng.lng]); redrawNoFly(); }
+  if(drawMode==='inspect'){ drawMode='none'; map.getContainer().style.cursor=''; console.log('ACMP_INSPECT:' + JSON.stringify([e.latlng.lat,e.latlng.lng])); }
 });
+map.on('contextmenu', e=>{ L.DomEvent.preventDefault(e.originalEvent); });
 map.on('mousedown', e=>{
   if(drawMode==='rectangle' || drawMode==='circle'){
     shapeStart=e.latlng; map.dragging.disable();
@@ -155,6 +201,7 @@ function endPreview(){ if(preview){map.removeLayer(preview);preview=null;} }
 function setDrawing(value){ drawMode=value?'area':'none'; map.getContainer().style.cursor=value?'crosshair':''; endPreview(); }
 function setShapeDrawing(kind){ drawMode=kind; map.getContainer().style.cursor='crosshair'; endPreview(); }
 function setNoFlyDrawing(value){ drawMode=value?'nofly':'none'; map.getContainer().style.cursor=value?'crosshair':''; endPreview(); if(!value) finishNoFly(); }
+function setInspect(value){ drawMode=value?'inspect':'none'; map.getContainer().style.cursor=value?'crosshair':''; endPreview(); }
 function finishNoFly(){ if(activeNoFly.length >= 3){noFlyZones.push(activeNoFly);emitNoFly();} activeNoFly=[];redrawNoFly(); }
 function cancelNoFly(){ activeNoFly=[];redrawNoFly(); }
 function deleteNoFly(index){ if(index>=0 && index<noFlyZones.length){noFlyZones.splice(index,1);redrawNoFly();emitNoFly();} }
@@ -169,6 +216,18 @@ function undo(){ if(points.length){points.pop();redraw();} }
 function clearPolygon(){ points=[]; redraw(); }
 function zoomToArea(){ const layers=[]; if(points.length) layers.push(L.polygon(points)); noFlyZones.forEach(z=>layers.push(L.polygon(z))); if(layers.length) map.fitBounds(L.featureGroup(layers).getBounds().pad(.12)); }
 function setBase(name){ if(name==='satellite'){map.removeLayer(normal);satellite.addTo(map);}else{map.removeLayer(satellite);normal.addTo(map);} }
+function setGeozones(value){ if(value){geozones.addTo(map);}else{map.removeLayer(geozones);} }
+function setGeozoneOpacity(value){ geozones.setOpacity(value/100); }
+function clearGeozoneConflicts(){ geozoneConflictLayer.clearLayers(); }
+function showGeozoneConflicts(features){
+  clearGeozoneConflicts();
+  L.geoJSON({type:'FeatureCollection',features:features},{
+    style:feature=>feature.properties._acmp_decision==='block'
+      ? {color:'#c92525',weight:3,fillColor:'#e53935',fillOpacity:.34,dashArray:'7 5'}
+      : {color:'#ff00b8',weight:3,fillColor:'#ff3dbf',fillOpacity:.30,dashArray:'7 5'},
+    onEachFeature:(feature,layer)=>layer.bindTooltip(`UAS-Geozone: ${feature.properties._acmp_label || 'Unbekannt'}`,{sticky:true})
+  }).addTo(geozoneConflictLayer);
+}
 function goTo(lat,lng,zoom){ map.setView([lat,lng],zoom || 16); L.marker([lat,lng]).addTo(map).bindPopup('Suchergebnis').openPopup(); }
 function clearMission(){ missionLayer.clearLayers(); }
 function showMission(route){
@@ -205,6 +264,7 @@ class MapPage(QWebEnginePage):
     polygon_changed = Signal(list)
     no_fly_changed = Signal(list)
     shape_completed = Signal()
+    inspection_requested = Signal(list)
 
     def javaScriptConsoleMessage(self, level, message, line_number, source_id):
         if message.startswith("ACMP_POLYGON:"):
@@ -219,7 +279,19 @@ class MapPage(QWebEnginePage):
                 pass
         elif message == "ACMP_SHAPE_DONE":
             self.shape_completed.emit()
+        elif message.startswith("ACMP_INSPECT:"):
+            try:
+                self.inspection_requested.emit(json.loads(message.removeprefix("ACMP_INSPECT:")))
+            except json.JSONDecodeError:
+                pass
         super().javaScriptConsoleMessage(level, message, line_number, source_id)
+
+
+class MapView(QWebEngineView):
+    """Unterdrückt das Browser-Kontextmenü innerhalb der Karte."""
+
+    def contextMenuEvent(self, event):
+        event.accept()
 
 
 from acmp.services.kmz_exporter import build_dji_kmz
@@ -229,6 +301,9 @@ from acmp.services.route_planner import (
 )
 
 class MainWindow(QMainWindow):
+    geozone_check_finished = Signal(int, object)
+    context_geozone_check_finished = Signal(object)
+
     def __init__(self):
         super().__init__()
         self.points: list[list[float]] = []
@@ -239,8 +314,17 @@ class MainWindow(QMainWindow):
         self.generated_route: list[list[float]] = []
         self.generated_missions: list[list[list[float]]] = []
         self.force_single_mission = False
+        self._geozone_check_id = 0
+        self._last_geozone_features: list[dict] = []
+        self._geozone_review_decisions: dict[str, str] = {}
+        self._geozone_review_base_zones: list = []
+        self._geozone_review_base_names: list[str] = []
+        self._geozone_review_dialog: QDialog | None = None
+        self.geozone_check_finished.connect(self._show_geozone_check_result)
+        self.context_geozone_check_finished.connect(self._show_context_geozone_result)
         self.settings = QSettings("ACMP", "Mission Planner")
         self.ui_language = self.settings.value("ui_language", "de")
+        self.geozone_zone_method = self.settings.value("geozone_zone_method", "global")
         self.setWindowTitle("ACMP – Aerial Capture Mission Planner")
         self.resize(1500, 900)
         self._build_ui()
@@ -273,11 +357,9 @@ class MainWindow(QMainWindow):
         load_preset.triggered.connect(self.load_preset)
         file_menu.addAction(load_preset)
 
-        self.settings_menu = menu_bar.addMenu("&Einstellungen")
-        settings_menu = self.settings_menu
-        language_action = QAction("Sprache …", self)
-        language_action.triggered.connect(self.choose_language)
-        settings_menu.addAction(language_action)
+        self.settings_action = QAction("Einstellungen", self)
+        self.settings_action.triggered.connect(self.open_settings_dialog)
+        menu_bar.addAction(self.settings_action)
         about = QAction("Info", self)
         about.triggered.connect(self._show_about)
         menu_bar.addAction(about)
@@ -286,9 +368,13 @@ class MainWindow(QMainWindow):
         self.page.polygon_changed.connect(self._polygon_changed)
         self.page.no_fly_changed.connect(self._no_fly_changed)
         self.page.shape_completed.connect(self._shape_completed)
+        self.page.inspection_requested.connect(self._inspect_map_point)
         self.page.permissionRequested.connect(self._handle_web_permission)
-        self.map_view = QWebEngineView()
+        self.map_view = MapView()
         self.map_view.setPage(self.page)
+        self.map_view.loadFinished.connect(
+            lambda _ok: self.js(f"setGeozoneOpacity({int(self.settings.value('geozone_opacity', 85))})")
+        )
         self.map_view.setHtml(MAP_HTML, QUrl("https://acmp.local/"))
 
         sidebar = self._build_sidebar()
@@ -339,6 +425,24 @@ class MainWindow(QMainWindow):
             lambda text: self.js("setBase('satellite')" if self._canonical(text) == "Satellit" else "setBase('normal')")
         )
         capture_layout.addWidget(self.base_layer)
+
+        geozone_group = QGroupBox("UAS-Geozonen")
+        geozone_layout = QHBoxLayout(geozone_group)
+        self.geozones_toggle = QCheckBox("UAS-Geozonen (Deutschland)")
+        self.geozones_toggle.setToolTip("Offizieller dipul/DFS-Kartenlayer, nur zur Orientierung.")
+        self.geozones_toggle.toggled.connect(self._set_geozones_enabled)
+        geozone_layout.addWidget(self.geozones_toggle, 1)
+        self.inspect_button = QPushButton("Was ist hier?")
+        self.inspect_button.setCheckable(True)
+        self.inspect_button.setEnabled(self.geozones_toggle.isChecked())
+        self.inspect_button.toggled.connect(self.set_inspect_mode)
+        geozone_layout.addWidget(self.inspect_button, 1)
+        self.geozone_review_button = QPushButton("Konflikte …")
+        self.geozone_review_button.setEnabled(False)
+        self.geozone_review_button.setToolTip("Zuletzt erkannte Überschneidungen erneut prüfen und bearbeiten.")
+        self.geozone_review_button.clicked.connect(self._open_geozone_review)
+        geozone_layout.addWidget(self.geozone_review_button, 1)
+        capture_layout.addWidget(geozone_group)
 
         self.draw_button = QPushButton("Polygon")
         self.draw_button.setCheckable(True)
@@ -665,6 +769,73 @@ class MainWindow(QMainWindow):
         self.ui_language = language
         self._apply_language()
 
+    def open_settings_dialog(self):
+        """Zentrale, nicht verstreute Einstellungen für Oberfläche und UAS-Geozonen."""
+        english = self.ui_language == "en"
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Settings" if english else "Einstellungen")
+        dialog.setMinimumWidth(440)
+        layout = QVBoxLayout(dialog)
+
+        language_row = QHBoxLayout()
+        language_row.addWidget(QLabel("Language" if english else "Sprache"))
+        language = QComboBox(dialog)
+        language.addItem("Deutsch", "de")
+        language.addItem("English", "en")
+        language.setCurrentIndex(1 if self.ui_language == "en" else 0)
+        language_row.addWidget(language, 1)
+        layout.addLayout(language_row)
+
+        geozones = QGroupBox("UAS geozones" if english else "UAS-Geozonen", dialog)
+        geozone_form = QFormLayout(geozones)
+        opacity = QSpinBox(geozones)
+        opacity.setRange(10, 100)
+        opacity.setSuffix(" %")
+        opacity.setValue(int(self.settings.value("geozone_opacity", 85)))
+        geozone_form.addRow("Opacity" if english else "Deckkraft", opacity)
+        zone_method = QComboBox(geozones)
+        zone_method.addItem("Global – full official area" if english else "Global – vollständige offizielle Fläche", "global")
+        zone_method.addItem("Fine – clipped intersection areas" if english else "Fein – zugeschnittene Schnittflächen", "fine")
+        zone_method.setCurrentIndex(1 if self.geozone_zone_method == "fine" else 0)
+        geozone_form.addRow("No-fly zone method" if english else "Sperrgebiets-Methode", zone_method)
+        layout.addWidget(geozones)
+
+        note = (
+            "Fine mode splits large official areas into their actual intersections with the flight area. "
+            "The setting applies to the next geozone check."
+            if english else
+            "Der Feinmodus schneidet große offizielle Flächen auf ihre tatsächlichen Schnittflächen mit dem Flugbereich zu. "
+            "Die Einstellung gilt für die nächste Geozonen-Prüfung."
+        )
+        layout.addWidget(QLabel(note))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.settings.setValue("geozone_opacity", opacity.value())
+        self.settings.setValue("geozone_zone_method", zone_method.currentData())
+        self.settings.setValue("ui_language", language.currentData())
+        self.settings.sync()
+        self.geozone_zone_method = zone_method.currentData()
+        self.js(f"setGeozoneOpacity({opacity.value()})")
+        if self.ui_language != language.currentData():
+            self.ui_language = language.currentData()
+            self._apply_language()
+
+    def set_geozone_opacity(self):
+        value, accepted = QInputDialog.getInt(self, "Geozonen-Deckkraft", "Deckkraft in Prozent:", 85, 10, 100, 5)
+        if accepted:
+            self.js(f"setGeozoneOpacity({value})")
+
+    def _set_geozones_enabled(self, enabled: bool):
+        self.js(f"setGeozones({str(enabled).lower()})")
+        self.geozone_review_button.setEnabled(enabled and bool(self._last_geozone_features))
+        self.inspect_button.setEnabled(enabled)
+        if not enabled and self.inspect_button.isChecked():
+            self.inspect_button.setChecked(False)
+
     def _apply_language(self):
         """Übersetzt alle sichtbaren Standardtexte; interne Routenwerte bleiben kanonisch deutsch."""
         def translate(text: str) -> str:
@@ -679,7 +850,7 @@ class MainWindow(QMainWindow):
             return text
 
         self.file_menu.setTitle(translate("Datei"))
-        self.settings_menu.setTitle(translate("Einstellungen"))
+        self.settings_action.setText(translate("Einstellungen"))
         for action in self.findChildren(QAction):
             action.setText(translate(action.text()))
         for widget_type in (QLabel, QPushButton):
@@ -863,28 +1034,384 @@ class MainWindow(QMainWindow):
         self.draw_button.setText("Fertig" if active else "Polygon")
         if active and self.no_fly_button.isChecked():
             self.no_fly_button.setChecked(False)
+        if active and self.inspect_button.isChecked():
+            self.inspect_button.setChecked(False)
         self.js(f"setDrawing({str(active).lower()})")
+        # Die Prüfung gehört zum Abschluss der Fläche, nicht zu jedem Klick.
+        if not active:
+            QTimer.singleShot(100, self._queue_geozone_check)
 
     def set_no_fly_drawing(self, active: bool):
         self.no_fly_button.setText("Sperrgebiet abschließen" if active else "Sperrgebiet zeichnen")
         if active and self.draw_button.isChecked():
             self.draw_button.setChecked(False)
+        if active and self.inspect_button.isChecked():
+            self.inspect_button.setChecked(False)
         self.js(f"setNoFlyDrawing({str(active).lower()})")
+
+    def set_inspect_mode(self, active: bool):
+        if active and self.draw_button.isChecked():
+            self.draw_button.setChecked(False)
+        if active and self.no_fly_button.isChecked():
+            self.no_fly_button.setChecked(False)
+        self.js(f"setInspect({str(active).lower()})")
+        if active:
+            self.statusBar().showMessage("Auf einen Punkt in der Karte klicken, um die UAS-Geozonen zu prüfen.", 5000)
 
     def start_shape(self, shape: str):
         if self.draw_button.isChecked():
             self.draw_button.setChecked(False)
         if self.no_fly_button.isChecked():
             self.no_fly_button.setChecked(False)
+        if self.inspect_button.isChecked():
+            self.inspect_button.setChecked(False)
         label = "Rechteck" if shape == "rectangle" else "Kreis"
         self.statusBar().showMessage(f"{label}: Auf der Karte klicken, gedrückt halten und aufziehen.", 5000)
         self.js(f"setShapeDrawing('{shape}')")
 
     def _shape_completed(self):
         self.statusBar().showMessage("Flugzone erstellt. Die Route kann nun neu generiert werden.", 4000)
+        QTimer.singleShot(100, self._queue_geozone_check)
+
+    def _queue_geozone_check(self):
+        """Prüft die fertig gezeichnete Flugfläche asynchron gegen dipul-WFS."""
+        if not self.geozones_toggle.isChecked() or len(self.points) < 3:
+            return
+        self._geozone_check_id += 1
+        check_id = self._geozone_check_id
+        points = [(float(lat), float(lon)) for lat, lon in self.points]
+        self.statusBar().showMessage("Prüfe UAS-Geozonen für die Flugfläche …", 2500)
+        threading.Thread(
+            target=self._run_geozone_check,
+            args=(check_id, points),
+            name="acmp-geozone-check",
+            daemon=True,
+        ).start()
+
+    def _run_geozone_check(self, check_id: int, points: list[tuple[float, float]]):
+        """Läuft außerhalb des UI-Threads; ein WFS-Ausfall blockiert die Karte nicht."""
+        try:
+            hits = self._query_geozone_features(points)
+        except (OSError, ValueError, UnicodeError):
+            hits = []
+        self.geozone_check_finished.emit(check_id, hits)
+
+    @staticmethod
+    def _point_in_polygon(point: tuple[float, float], polygon: list[tuple[float, float]]) -> bool:
+        """Ray-casting inklusive Rand; Koordinaten sind (Breite, Länge)."""
+        lat, lon = point
+        inside = False
+        for index, (lat_a, lon_a) in enumerate(polygon):
+            lat_b, lon_b = polygon[(index + 1) % len(polygon)]
+            if ((lon_a > lon) != (lon_b > lon)) and lat < (lat_b - lat_a) * (lon - lon_a) / (lon_b - lon_a) + lat_a:
+                inside = not inside
+        return inside
+
+    @staticmethod
+    def _segments_intersect(
+        first_a: tuple[float, float], first_b: tuple[float, float],
+        second_a: tuple[float, float], second_b: tuple[float, float],
+    ) -> bool:
+        def orientation(a, b, c):
+            value = (b[1] - a[1]) * (c[0] - b[0]) - (b[0] - a[0]) * (c[1] - b[1])
+            return 0 if abs(value) < 1e-12 else (1 if value > 0 else -1)
+        one = orientation(first_a, first_b, second_a)
+        two = orientation(first_a, first_b, second_b)
+        three = orientation(second_a, second_b, first_a)
+        four = orientation(second_a, second_b, first_b)
+        return one != two and three != four
+
+    @staticmethod
+    def _polygons_intersect(first: list[tuple[float, float]], second: list[tuple[float, float]]) -> bool:
+        if any(MainWindow._point_in_polygon(point, second) for point in first):
+            return True
+        if any(MainWindow._point_in_polygon(point, first) for point in second):
+            return True
+        return any(
+            MainWindow._segments_intersect(a, b, c, d)
+            for index, a in enumerate(first)
+            for b in [first[(index + 1) % len(first)]]
+            for other_index, c in enumerate(second)
+            for d in [second[(other_index + 1) % len(second)]]
+        )
+
+    @staticmethod
+    def _feature_rings(feature: dict) -> list[list[tuple[float, float]]]:
+        geometry = feature.get("geometry") or {}
+        coordinates = geometry.get("coordinates") or []
+        if geometry.get("type") == "Polygon":
+            polygons = [coordinates]
+        elif geometry.get("type") == "MultiPolygon":
+            polygons = coordinates
+        else:
+            return []
+        return [
+            [(float(lat), float(lon)) for lon, lat, *_ in polygon[0]]
+            for polygon in polygons if polygon and polygon[0]
+        ]
+
+    def _query_geozone_features(self, points: list[tuple[float, float]]) -> list[dict]:
+        """Lädt echte GeoJSON-Flächen vom offiziellen WFS und filtert Schnittmengen."""
+        latitudes, longitudes = zip(*points)
+        bbox = f"{min(longitudes)},{min(latitudes)},{max(longitudes)},{max(latitudes)},EPSG:4326"
+        flight_area = Polygon([(lon, lat) for lat, lon in points])
+
+        def polygon_parts(geometry):
+            if geometry.is_empty:
+                return []
+            if geometry.geom_type == "Polygon":
+                return [geometry]
+            if geometry.geom_type in {"MultiPolygon", "GeometryCollection"}:
+                return [part for item in geometry.geoms for part in polygon_parts(item)]
+            return []
+
+        def load_layer(layer: str) -> list[dict]:
+            params = {
+                "SERVICE": "WFS", "VERSION": "2.0.0", "REQUEST": "GetFeature",
+                "typeNames": layer, "outputFormat": "application/json", "bbox": bbox, "count": 100,
+            }
+            with urlopen(f"https://uas-betrieb.de/geoservices/dipul/wfs?{urlencode(params)}", timeout=8.0) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            matching = []
+            for feature in payload.get("features", []):
+                geometry = shape(feature.get("geometry"))
+                if not geometry.intersects(flight_area):
+                    continue
+                if self.geozone_zone_method == "fine":
+                    for part_index, part in enumerate(polygon_parts(geometry.intersection(flight_area)), start=1):
+                        clipped = json.loads(json.dumps(feature))
+                        clipped["id"] = f"{feature.get('id', layer)}:part-{part_index}"
+                        clipped["geometry"] = mapping(part)
+                        clipped.setdefault("properties", {})["_acmp_label"] = GEOZONE_LABELS[layer]
+                        matching.append(clipped)
+                else:
+                    feature.setdefault("properties", {})["_acmp_label"] = GEOZONE_LABELS[layer]
+                    matching.append(feature)
+            return matching
+
+        features: list[dict] = []
+        # Begrenzte Parallelität hält die Wartezeit kurz, ohne den öffentlichen Dienst zu überlasten.
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(load_layer, layer) for layer in GEOZONE_LABELS]
+            for future in as_completed(futures):
+                try:
+                    features.extend(future.result())
+                except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
+                    continue
+        return features
+
+    def _inspect_map_point(self, coordinate: list):
+        """Empfängt den Klick des Kartenmodus 'Was ist hier?'."""
+        if hasattr(self, "inspect_button") and self.inspect_button.isChecked():
+            self.inspect_button.setChecked(False)
+        self._start_context_geozone_check(coordinate)
+
+    def _start_context_geozone_check(self, coordinate):
+        if not isinstance(coordinate, list) or len(coordinate) != 2:
+            return
+        try:
+            lat, lon = float(coordinate[0]), float(coordinate[1])
+        except (TypeError, ValueError):
+            return
+        delta = 0.00002
+        probe = [(lat - delta, lon - delta), (lat - delta, lon + delta),
+                 (lat + delta, lon + delta), (lat + delta, lon - delta)]
+        self.statusBar().showMessage("Prüfe UAS-Geozonen an dieser Stelle …", 2500)
+        threading.Thread(
+            target=self._run_context_geozone_check,
+            args=(probe,),
+            name="acmp-context-geozone-check",
+            daemon=True,
+        ).start()
+
+    def _run_context_geozone_check(self, probe: list[tuple[float, float]]):
+        try:
+            features = self._query_geozone_features(probe)
+        except (OSError, ValueError, UnicodeError):
+            features = []
+        self.context_geozone_check_finished.emit(features)
+
+    def _show_context_geozone_result(self, features: object):
+        if not self.geozones_toggle.isChecked():
+            return
+        english = self.ui_language == "en"
+        title = "What's here?" if english else "Was ist hier?"
+        if not features:
+            QMessageBox.information(
+                self, title,
+                "No configured UAS geozone was found at this position. A flight may be permitted, but you must still check applicable rules, NOTAMs and local conditions." if english
+                else "An dieser Position wurde keine konfigurierte UAS-Geozone gefunden. Ein Flug kann zulässig sein; prüfe dennoch geltende Regeln, NOTAMs und die örtlichen Bedingungen.",
+            )
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setMinimumSize(560, 360)
+        layout = QVBoxLayout(dialog)
+        heading = "The following UAS geozones apply at this position:" if english else "An dieser Position gelten folgende UAS-Geozonen:"
+        layout.addWidget(QLabel(heading))
+        details = QTextBrowser(dialog)
+        details.setOpenExternalLinks(True)
+        items = []
+        for feature in features:
+            properties = feature.get("properties", {})
+            label = escape(str(properties.get("_acmp_label", "Unknown" if english else "Unbekannt")))
+            reference = escape(str(properties.get("legal_ref", "")))
+            raw_reference = str(properties.get("legal_ref", "")).lower()
+            # § 21h ist die amtliche Regelgrundlage für die meisten festen UAS-Gebiete.
+            law_url = "https://www.gesetze-im-internet.de/luftvo_2015/__21h.html"
+            dfs_url = (
+                "https://dfs.de/homepage/en/drone-flight/applications-and-approvals/"
+                if english else "https://dfs.de/homepage/de/drohnenflug/antraege-und-genehmigungen/"
+            )
+            primary_url = law_url if "21h" in raw_reference else dfs_url
+            primary_label = "Official rule text" if english else "Amtlicher Regeltext"
+            line = f"<li><b>{label}</b>"
+            if reference:
+                line += f" – {reference}"
+            line += f' – <a href="{primary_url}">{primary_label}</a>'
+            if "21h" not in raw_reference:
+                line += f' · <a href="{law_url}">LuftVO § 21h</a>'
+            line += "</li>"
+            items.append(line)
+        notice = (
+            "The links are provided for orientation. Please also check current NOTAMs, local requirements, approvals and obstacles; this is not a binding flight clearance."
+            if english else
+            "Die Links dienen der Orientierung. Prüfe zusätzlich aktuelle NOTAMs, örtliche Vorgaben, Freigaben und Hindernisse; dies ist keine verbindliche Flugfreigabe."
+        )
+        details.setHtml("<ul>" + "".join(items) + f"</ul><p>{escape(notice)}</p>")
+        layout.addWidget(details)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
+
+    @staticmethod
+    def _geozone_feature_key(feature: dict, index: int) -> str:
+        return str(feature.get("id") or f"{feature.get('properties', {}).get('_acmp_label', 'zone')}:{index}")
+
+    def _show_geozone_check_result(self, check_id: int, features: object):
+        """Lässt jede einzelne, tatsächlich berührte WFS-Fläche separat behandeln."""
+        if not self.geozones_toggle.isChecked() or check_id != self._geozone_check_id or not features:
+            return
+        if self._geozone_review_dialog and self._geozone_review_dialog.isVisible():
+            self._geozone_review_dialog.close()
+        self._last_geozone_features = list(features)
+        self._geozone_review_decisions = {
+            self._geozone_feature_key(feature, index): "ignore"
+            for index, feature in enumerate(self._last_geozone_features)
+        }
+        self._geozone_review_base_zones = json.loads(json.dumps(self.no_fly_zones))
+        self._geozone_review_base_names = list(self.no_fly_names)
+        self.geozone_review_button.setEnabled(True)
+        self._open_geozone_review()
+
+    def _open_geozone_review(self):
+        """Öffnet die letzte Konfliktprüfung erneut, ohne die Karte neu zu zeichnen."""
+        if not self.geozones_toggle.isChecked() or not self._last_geozone_features:
+            return
+        if self._geozone_review_dialog and self._geozone_review_dialog.isVisible():
+            self._geozone_review_dialog.raise_()
+            self._geozone_review_dialog.activateWindow()
+            return
+        features = self._last_geozone_features
+        decisions = self._geozone_review_decisions
+        base_zones = self._geozone_review_base_zones
+        base_names = self._geozone_review_base_names
+        english = self.ui_language == "en"
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Review UAS geozones" if english else "UAS-Geozonen prüfen")
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        dialog.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+        dialog.setMinimumWidth(680)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(
+            "Each intersecting official area can be ignored, highlighted or added as a no-fly zone independently. "
+            "Changes are shown immediately on the map."
+            if english else
+            "Jede berührte offizielle Fläche kann unabhängig ignoriert, markiert oder als Sperrgebiet übernommen werden. "
+            "Änderungen werden sofort auf der Karte angezeigt."
+        ))
+        table = QTableWidget(len(features), 2, dialog)
+        table.setHorizontalHeaderLabels(["Intersecting area", "Action"] if english else ["Berührte Fläche", "Behandlung"])
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setColumnWidth(0, 420)
+        table.horizontalHeader().setStretchLastSection(True)
+        for index, feature in enumerate(features):
+            key = self._geozone_feature_key(feature, index)
+            label = feature.get("properties", {}).get("_acmp_label", "UAS-Geozone")
+            identifier = feature.get("id", f"Fläche {index + 1}")
+            table.setItem(index, 0, QTableWidgetItem(f"{label} · {identifier}"))
+            choice = QComboBox(table)
+            choice.addItem("Ignore" if english else "Ignorieren", "ignore")
+            choice.addItem("Highlight area" if english else "Bereich markieren", "mark")
+            choice.addItem("Add as no-fly zone" if english else "Als Sperrgebiet", "block")
+            choice.setCurrentIndex({"ignore": 0, "mark": 1, "block": 2}[decisions[key]])
+            choice.currentIndexChanged.connect(
+                lambda _value, feature_key=key, combo=choice: self._change_geozone_decision(
+                    feature_key, combo.currentData(), decisions, features, base_zones, base_names
+                )
+            )
+            table.setCellWidget(index, 1, choice)
+        layout.addWidget(table)
+        layout.addWidget(QLabel(
+            "Please check current geozones, NOTAMs, local laws, approvals and obstacles. "
+            "This is not a binding flight clearance."
+            if english else
+            "Bitte prüfe aktuelle Geozonen, NOTAMs, lokale Gesetze, Freigaben und Hindernisse. "
+            "Dies ist keine verbindliche Flugfreigabe."
+        ))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, parent=dialog)
+        buttons.accepted.connect(dialog.close)
+        layout.addWidget(buttons)
+        self._geozone_review_dialog = dialog
+        dialog.finished.connect(lambda _result: setattr(self, "_geozone_review_dialog", None))
+        dialog.show()
+        dialog.raise_()
+
+    def _change_geozone_decision(
+        self, key: str, decision: str, decisions: dict[str, str], features: list[dict],
+        base_zones: list, base_names: list[str],
+    ):
+        decisions[key] = decision
+        self._apply_geozone_decisions(features, decisions, base_zones, base_names)
+
+    def _apply_geozone_decisions(
+        self, features: list[dict], decisions: dict[str, str], base_zones: list, base_names: list[str],
+    ):
+        """Aktualisiert Markierungen und temporär hinzugefügte Sperrgebiete live."""
+        visible_features: list[dict] = []
+        additions: list[list[list[float]]] = []
+        names: list[str] = []
+        for index, feature in enumerate(features):
+            decision = decisions[self._geozone_feature_key(feature, index)]
+            if decision == "ignore":
+                continue
+            rendered = json.loads(json.dumps(feature))
+            rendered.setdefault("properties", {})["_acmp_decision"] = decision
+            visible_features.append(rendered)
+            if decision == "block":
+                label = feature.get("properties", {}).get("_acmp_label", "UAS-Geozone")
+                for ring in self._feature_rings(feature):
+                    if len(ring) >= 3:
+                        additions.append([[lat, lon] for lat, lon in ring])
+                        names.append(f"UAS: {label}")
+        self.no_fly_zones = json.loads(json.dumps(base_zones)) + additions
+        self.no_fly_names = list(base_names) + names
+        self._no_fly_changed(self.no_fly_zones)
+        self.js(f"setProjectGeometry({json.dumps(self.points)}, {json.dumps(self.no_fly_zones)});")
+        self.js(f"showGeozoneConflicts({json.dumps(visible_features)});")
 
     def _polygon_changed(self, points: list):
         self.points = points
+        if self._geozone_review_dialog and self._geozone_review_dialog.isVisible():
+            self._geozone_review_dialog.close()
+        self._last_geozone_features = []
+        self._geozone_review_decisions = {}
+        if hasattr(self, "geozone_review_button"):
+            self.geozone_review_button.setEnabled(False)
         if self._canonical(self.direction_mode.currentText()) == "Optimal (längste Kante)":
             self._direction_mode_changed("Optimal (längste Kante)")
         self.generated_route = []
@@ -893,6 +1420,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "force_one_button"):
             self.force_one_button.setVisible(False)
         self.js("clearMission()")
+        self.js("clearGeozoneConflicts()")
         self._refresh_geometry_ui()
 
     def _refresh_geometry_ui(self):
@@ -1272,4 +1800,4 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Koordinaten wurden in die Zwischenablage kopiert.", 3000)
 
     def _show_about(self):
-        QMessageBox.information(self, "ACMP", "ACMP – Polygon-Karte\n\nZum Vorbereiten von Flächen für spätere DJI-Missionen.")
+        QMessageBox.information(self, "ACMP", "ACMP – Aerial Capture Mission Planner\n\nDie optionalen UAS-Geozonen stammen aus dem dipul/DFS-WMS und dienen ausschließlich der Orientierung. Sie ersetzen keine verbindliche Prüfung aktueller Geozonen, NOTAMs, örtlicher Vorschriften, Freigaben oder Hindernisse.\n\nDer Betrieb erfolgt eigenverantwortlich; ACMP übernimmt keine Haftung für Flugplanung oder Flugdurchführung.")
