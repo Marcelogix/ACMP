@@ -1,6 +1,17 @@
-# ACMP – Polygon-Karte für DJI-Missionsvorbereitung
+# ACMP – Aerial Capture Mission Planner
 
-Eine kleine Desktop-Anwendung zum Suchen von Adressen und Einzeichnen eines Gebiets auf einer interaktiven Karte.
+ACMP is a desktop tool for drawing mapping areas on an interactive map, planning coverage routes, and exporting DJI WPML/KMZ missions.
+
+> **Early version:** ACMP currently focuses on core area drawing, coverage-route planning, and DJI mission export.
+
+## Key Features
+
+- Create flight areas as polygons, rectangles, or circles.
+- Add multiple no-fly zones inside a mapping area.
+- Configure essential flight settings such as altitude, speed, path spacing, and route direction.
+- Set mission limits for maximum waypoints and flight duration.
+- Automatically split large routes into multiple missions when limits are exceeded.
+- Configure camera actions and photo spacing for photogrammetry workflows.
 
 ## Start
 
@@ -9,37 +20,33 @@ py -3.12 -m pip install -r requirements.txt
 py -3.12 main.py
 ```
 
-## Struktur und EXE-Build
+The map and address search require an internet connection.
 
-Die Startdatei [`main.py`](main.py) ist bewusst schlank; die Anwendung liegt als Paket unter [`acmp/`](acmp/). Die Qt-Oberfläche liegt in [`acmp/ui/main_window.py`](acmp/ui/main_window.py), Sprachhilfen in [`acmp/i18n.py`](acmp/i18n.py).
+## Usage
 
-Für eine Windows-EXE kann optional [`build_exe.bat`](build_exe.bat) gestartet werden. Das Skript installiert bei Bedarf PyInstaller und erzeugt anschließend `dist\ACMP\ACMP.exe` im robusteren *one-folder*-Format. Die erzeugten Ordner `build/`, `dist/` und die Datei `ACMP.spec` gehören nicht in Git.
+1. In **Map & Area**, search for an address or use your current location.
+2. Draw the flight area as a polygon, rectangle, or circle.
+3. Add red no-fly zones where the drone must not fly.
+4. In **Flight Settings**, choose altitude, speed, path spacing, direction, camera action, and mission limits.
+5. Generate the route and inspect its waypoints on the map.
+6. Save the editable project from **File → Save As** when you want to continue later.
+7. Export the planned mission as a DJI-compatible KMZ file from **Export**.
 
-Beim ersten Start benötigt die Karte eine Internetverbindung (Kartenkacheln und die Adresssuche werden online geladen).
+## DJI RC Import Workflow
 
-## Bedienung
+1. On the RC controller, create and save a simple placeholder waypoint mission first. DJI Fly creates the required mission structure only after a mission exists.
+2. Connect the RC controller to a computer and use its file manager/MTP storage to locate that placeholder mission.
+3. Copy or replace the placeholder mission KMZ with the ACMP-exported KMZ, keeping the expected mission filename and location.
+4. Open the mission in DJI Fly and carefully inspect the route, altitude, camera action, and waypoint count before flying.
 
-1. Im Tab **Karte & Gebiet** Adresse bzw. Ort eingeben und auf **Suchen** drücken; **Mein Standort** zentriert die Karte nach Freigabe des Windows-Standorts.
-2. Mit **Polygon** Punkte per Linksklick setzen. Für eine schnellere Flugzone stehen daneben **Rechteck** und **Kreis** bereit; auf der Karte jeweils klicken, gedrückt halten und aufziehen.
-3. Ab dem dritten Punkt erscheint die geschlossene Fläche automatisch. Mit **Punkt rückgängig** oder **Alles löschen** lässt sie sich anpassen.
-4. Mit **Sperrgebiet zeichnen** lassen sich mehrere rote Ausschlussflächen anlegen. Jedes kann in der Liste einzeln ausgewählt und gelöscht werden; die Berechnung lässt dort keine Abdeckungswegpunkte entstehen und führt geteilte Bahnen mit einem kleinen Randabstand außen herum.
-5. Im Tab **Flugeinstellungen** Höhe, Geschwindigkeit, Bahnabstand und Richtung festlegen. **Route generieren** zeichnet die resultierende Zickzack-Route mit nummerierten, gerichteten Wegpunkten auf der Karte.
-6. Die Planung prüft Wegpunktzahl und Flugzeit je Teilmission. Über 60 Wegpunkte erscheint ein orangefarbener Hinweis; eine Teilung erfolgt erst beim Überschreiten einer dieser harten Grenzen. Bei Bedarf wird die Route nach der gewählten Methode auf mehrere zusammenhängende Teilmissionen verteilt. Kameraauslösung, Überlappungen und Gimbal-Neigung sind für den späteren DJI/KMZ-Export hinterlegt.
-7. Im Tab **Exportieren** lässt sich eine DJI-WPML-KMZ speichern. Bei per USB angeschlossenen DJI-RC-Controllern erfolgt der anschließende Import über die Dateiverwaltung bzw. die DJI-App.
-8. Über **Datei → Speichern unter …** wird ein bearbeitbares ACMP-Projekt (`.acmp.json`) mit Fluggebiet, Sperrgebieten, Flugeinstellungen, Exportnamen und der gegebenenfalls bereits erzeugten Route gespeichert. Mit **Datei → Öffnen …** kann es später wiederhergestellt werden.
+> **Important:** Do not save the imported mission again in DJI Fly. Saving it can rebuild the route with DJI's smoothing/moving behavior and change the straight waypoint path created by ACMP.
 
-Die Punkte werden im WGS84-Format (`latitude`, `longitude`) gehalten – die übliche Grundlage für spätere DJI-/KMZ-Exportfunktionen. Die aktuelle Route ist eine visuelle Planungsroute; vor einem Drohnenflug müssen Fluggerät, Kamera, örtliche Vorschriften, Hindernisse und die erzeugte KMZ-Mission geprüft werden.
+## Planned Features
 
-Ein direkter Dateizugriff auf den Controller ist nicht enthalten: Windows bindet viele DJI-RC-Controller als Android-MTP-Gerät und nicht als normalen Dateisystempfad ein. Vor dem Einsatz die Mission in DJI Fly bzw. DJI Pilot prüfen.
+- Multi-altitude capture routes for photogrammetric scans from different heights and perspectives.
+- Automatic safety boundaries around buildings and surrounding objects, ideally including signs, trees, and similar obstacles.
+- Use of geospatial data such as **CityGML/CityJSON** building models, **LAS/LAZ** LiDAR point clouds, and **GeoTIFF** elevation models (DSM/DTM).
 
-Für die Bahnrichtung stehen feste Himmelsrichtungen, eine eigene Gradzahl sowie zwei Optimierungen zur Verfügung: **Optimal (längste Kante)** ist eine schnelle Heuristik; **Optimal (kürzeste Flugzeit)** bewertet die erzeugte Route inklusive Sperrgebiets-Umwegen über alle Ausrichtungen und wählt die kürzeste. Bei konstanter Geschwindigkeit entspricht sie der kürzesten Flugzeit. Über die obere Leiste lassen sich Flugeinstellungen als benannte Presets speichern und laden.
+## Notes
 
-Unter **Routenmodus** kann zwischen glatten DJI-Kurven, dem WPML-Modus mit Punktstopp (modellabhängig) und zusätzlichen Stützpunkten gewählt werden. Der Stützpunktmodus nähert die Sollbahn an, erhöht aber Wegpunktzahl und kann dadurch weitere Teilmissionen erzeugen. Für den Punktstoppmodus rechnet die Zeitprognose mit einem sichtbaren, groben Zuschlag von etwa drei Sekunden pro deutlichem Richtungswechsel.
-
-Unter **Missionsgrenze** lassen sich außerdem die Aktion bei Flugende (Home, Schweben, Landen oder erster Wegpunkt) und bei Signalverlust (Home, Schweben oder Landen) festlegen. Diese Einstellungen werden als WPML-Missionsparameter exportiert; der Controller bzw. die Drohne kann sie abhängig von Modell, Firmware und Sicherheitsvorgaben abweichend behandeln.
-
-Der Export-Tab erzeugt auf Wunsch ein JPEG-Vorschaubild in 400 × 300 Pixeln – optional mit einem separat eingegebenen, längeren Vorschaunamen. Es ist für die Zuordnung zu einer DJI-Fly-Mission gedacht; DJI Fly aktualisiert sein internes Thumbnail nach einem externen KMZ-Austausch nicht zwingend automatisch.
-
-## Hinweis zur Suche
-
-Die Suchfunktion verwendet den öffentlichen Nominatim-Dienst von OpenStreetMap. Bitte keine automatisierten Massenanfragen ausführen.
+- You are responsible for local regulations, obstacle clearance, aircraft limits, and safe operation.
