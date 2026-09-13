@@ -150,7 +150,9 @@ def plan_missions(route,max_points,max_seconds,speed_mps,mode,turn_delay_s=0):
     for p in route[1:]:
         if len(current)+1>max_points or estimated_route_seconds(current+[p],speed_mps,turn_delay_s)>max_seconds:
             if len(current)<2:return []
-            result.append(current);current=[p]
+            # Den Übergangspunkt in beide Missionen aufnehmen. So setzt die
+            # Folgemission exakt am Ende der vorherigen an.
+            result.append(current);current=[current[-1],p]
         else:current.append(p)
     return result+[current] if len(current)>=2 else result
 
