@@ -159,6 +159,7 @@ function finishNoFly(){ if(activeNoFly.length >= 3){noFlyZones.push(activeNoFly)
 function cancelNoFly(){ activeNoFly=[];redrawNoFly(); }
 function deleteNoFly(index){ if(index>=0 && index<noFlyZones.length){noFlyZones.splice(index,1);redrawNoFly();emitNoFly();} }
 function clearNoFly(){ noFlyZones=[];activeNoFly=[];redrawNoFly();emitNoFly(); }
+function clearAll(){ points=[]; noFlyZones=[]; activeNoFly=[]; redraw(); redrawNoFly(); emitNoFly(); }
 function setProjectGeometry(newPoints,newZones){
   points=Array.isArray(newPoints)?newPoints:[];
   noFlyZones=Array.isArray(newZones)?newZones:[];
@@ -166,6 +167,7 @@ function setProjectGeometry(newPoints,newZones){
 }
 function undo(){ if(points.length){points.pop();redraw();} }
 function clearPolygon(){ points=[]; redraw(); }
+function zoomToArea(){ const layers=[]; if(points.length) layers.push(L.polygon(points)); noFlyZones.forEach(z=>layers.push(L.polygon(z))); if(layers.length) map.fitBounds(L.featureGroup(layers).getBounds().pad(.12)); }
 function setBase(name){ if(name==='satellite'){map.removeLayer(normal);satellite.addTo(map);}else{map.removeLayer(satellite);normal.addTo(map);} }
 function goTo(lat,lng,zoom){ map.setView([lat,lng],zoom || 16); L.marker([lat,lng]).addTo(map).bindPopup('Suchergebnis').openPopup(); }
 function clearMission(){ missionLayer.clearLayers(); }
@@ -231,6 +233,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.points: list[list[float]] = []
         self.no_fly_zones: list[list[list[float]]] = []
+        self.no_fly_names: list[str] = []
+        self.current_project_path: Path | None = None
+        self.preset_dir = Path(__file__).resolve().parents[2] / "presets"
         self.generated_route: list[list[float]] = []
         self.generated_missions: list[list[list[float]]] = []
         self.force_single_mission = False
@@ -244,10 +249,18 @@ class MainWindow(QMainWindow):
         menu_bar = self.menuBar()
         self.file_menu = menu_bar.addMenu("&Datei")
         file_menu = self.file_menu
+        new_project = QAction("Neu", self)
+        new_project.setShortcut("Ctrl+N")
+        new_project.triggered.connect(self.new_project)
+        file_menu.addAction(new_project)
         open_project = QAction("Öffnen …", self)
         open_project.setShortcut("Ctrl+O")
         open_project.triggered.connect(self.open_project)
         file_menu.addAction(open_project)
+        save_current = QAction("Speichern", self)
+        save_current.setShortcut("Ctrl+S")
+        save_current.triggered.connect(self.save_project)
+        file_menu.addAction(save_current)
         save_project = QAction("Speichern unter …", self)
         save_project.setShortcut("Ctrl+Shift+S")
         save_project.triggered.connect(self.save_project_as)
@@ -335,16 +348,16 @@ class MainWindow(QMainWindow):
         self.circle_button = QPushButton("Kreis")
         self.circle_button.clicked.connect(lambda: self.start_shape("circle"))
         shape_row = QHBoxLayout()
-        shape_row.addWidget(self.draw_button, 2)
+        shape_row.addWidget(self.draw_button)
         shape_row.addWidget(self.rectangle_button)
         shape_row.addWidget(self.circle_button)
         capture_layout.addLayout(shape_row)
         undo_button = QPushButton("Letzten Punkt rückgängig")
         undo_button.clicked.connect(lambda: self.js("undo()"))
         capture_layout.addWidget(undo_button)
-        clear_button = QPushButton("Alles löschen")
-        clear_button.clicked.connect(lambda: self.js("clearPolygon()"))
-        capture_layout.addWidget(clear_button)
+        zoom_button = QPushButton("Auf Flugbereich zoomen")
+        zoom_button.clicked.connect(lambda: self.js("zoomToArea()"))
+        capture_layout.addWidget(zoom_button)
 
         capture_layout.addWidget(QLabel("<b>Sperrgebiete</b>"))
         self.no_fly_button = QPushButton("Sperrgebiet zeichnen")
@@ -357,10 +370,14 @@ class MainWindow(QMainWindow):
         capture_layout.addWidget(cancel_no_fly)
         self.zone_list = QListWidget()
         self.zone_list.setMinimumHeight(95)
+        self.zone_list.itemDoubleClicked.connect(self.rename_no_fly_zone)
         capture_layout.addWidget(self.zone_list)
         delete_zone = QPushButton("Ausgewähltes Sperrgebiet löschen")
         delete_zone.clicked.connect(self.delete_selected_no_fly)
         capture_layout.addWidget(delete_zone)
+        clear_button = QPushButton("Alles löschen")
+        clear_button.clicked.connect(lambda: self.js("clearAll()"))
+        capture_layout.addWidget(clear_button)
 
         capture_layout.addWidget(QLabel("<hr>"))
         self.count_label = QLabel("Punkte: 0")
@@ -513,22 +530,24 @@ class MainWindow(QMainWindow):
         save_kmz = QPushButton("KMZ-Datei speichern …")
         save_kmz.clicked.connect(self.export_kmz_file)
         export_layout.addWidget(save_kmz)
+        preview_group = QGroupBox("Vorschaubilder – experimentell")
+        preview_layout = QVBoxLayout(preview_group)
+        preview_note = QLabel("Die Bilddateien werden erstellt, aber DJI Fly übernimmt externe Vorschaubilder möglicherweise nicht.")
+        preview_note.setWordWrap(True)
+        preview_note.setStyleSheet("color:#9a6700;")
+        preview_layout.addWidget(preview_note)
         save_preview = QPushButton("Vorschaubild speichern …")
         save_preview.clicked.connect(lambda: self.export_preview_image(False))
-        export_layout.addWidget(save_preview)
-        export_layout.addWidget(QLabel("Text im Vorschaubild"))
+        preview_layout.addWidget(save_preview)
+        preview_layout.addWidget(QLabel("Text im Vorschaubild"))
         self.thumbnail_title = QLineEdit()
         self.thumbnail_title.setPlaceholderText("z. B. Kirche Nord – Akku 1 – 60 m")
-        export_layout.addWidget(self.thumbnail_title)
+        preview_layout.addWidget(self.thumbnail_title)
         save_named_preview = QPushButton("Vorschaubild mit Name speichern …")
         save_named_preview.clicked.connect(lambda: self.export_preview_image(True))
-        export_layout.addWidget(save_named_preview)
-        export_layout.addWidget(QLabel("Vorschauformat: JPEG, 400 × 300 Pixel"))
-        export_layout.addWidget(QLabel("<hr><b>DJI-Controller</b>"))
-        export_layout.addWidget(QLabel(
-            "Ein per USB angeschlossener DJI RC wird von Windows meist als Android-MTP-Gerät statt als Laufwerk behandelt. "
-            "Der direkte Export wurde deshalb entfernt. Speichere die KMZ-Datei und importiere bzw. kopiere sie über die Dateiverwaltung des Controllers."
-        ))
+        preview_layout.addWidget(save_named_preview)
+        preview_layout.addWidget(QLabel("Vorschauformat: JPEG, 400 × 300 Pixel"))
+        export_layout.addWidget(preview_group)
         export_layout.addStretch(1)
         tabs.addTab(export, "Exportieren")
         return side
@@ -588,27 +607,26 @@ class MainWindow(QMainWindow):
         name = name.strip()
         if not accepted or not name:
             return
-        self.settings.beginGroup("flight_presets")
-        self.settings.setValue(name, json.dumps(self._preset_values()))
-        self.settings.endGroup()
-        self.settings.sync()
-        self.statusBar().showMessage(f"Preset „{name}“ gespeichert.", 3000)
+        safe_name="".join(char for char in name if char.isalnum() or char in "-_ ").strip() or "Preset"
+        try:
+            self.preset_dir.mkdir(exist_ok=True)
+            destination=self.preset_dir / f"{safe_name}.json"
+            destination.write_text(json.dumps(self._preset_values(),ensure_ascii=False,indent=2),encoding="utf-8")
+        except OSError as error:
+            QMessageBox.critical(self,"Preset fehlgeschlagen",f"Das Preset konnte nicht gespeichert werden:\n\n{error}"); return
+        self.statusBar().showMessage(f"Preset gespeichert: {destination.name}", 3000)
 
     def load_preset(self):
-        self.settings.beginGroup("flight_presets")
-        names = self.settings.childKeys()
-        self.settings.endGroup()
-        if not names:
+        files=sorted(self.preset_dir.glob("*.json")) if self.preset_dir.is_dir() else []
+        if not files:
             QMessageBox.information(self, "Keine Presets", "Es wurde noch kein Flugeinstellungs-Preset gespeichert.")
             return
-        name, accepted = QInputDialog.getItem(self, "Preset laden", "Preset:", sorted(names), 0, False)
+        names=[file.stem for file in files]
+        name, accepted = QInputDialog.getItem(self, "Preset laden", "Preset:", names, 0, False)
         if not accepted:
             return
-        self.settings.beginGroup("flight_presets")
-        raw = self.settings.value(name, "{}")
-        self.settings.endGroup()
         try:
-            values = json.loads(raw)
+            values = json.loads((self.preset_dir / f"{name}.json").read_text(encoding="utf-8"))
             for field, key in [
                 (self.altitude, "altitude"), (self.speed, "speed"), (self.path_spacing, "path_spacing"),
                 (self.side_overlap, "side_overlap"), (self.forward_overlap, "forward_overlap"),
@@ -650,7 +668,12 @@ class MainWindow(QMainWindow):
     def _apply_language(self):
         """Übersetzt alle sichtbaren Standardtexte; interne Routenwerte bleiben kanonisch deutsch."""
         def translate(text: str) -> str:
-            replacements = UI_EN.items() if self.ui_language == "en" else UI_DE.items()
+            # Die Quelltexte der Oberfläche sind deutsch. Bei deutscher UI
+            # darf keine Rückübersetzung stattfinden ("Export" ist sonst ein
+            # Teilstring von "Exportieren").
+            if self.ui_language != "en":
+                return text
+            replacements = UI_EN.items()
             for source, target in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
                 text = text.replace(source, target)
             return text
@@ -746,7 +769,35 @@ class MainWindow(QMainWindow):
         except OSError as error:
             QMessageBox.critical(self, "Speichern fehlgeschlagen", f"Das Projekt konnte nicht gespeichert werden.\n\n{error}")
             return
+        self.current_project_path = destination
         self.statusBar().showMessage(f"Projekt gespeichert: {destination.name}", 5000)
+
+    def save_project(self):
+        if self.current_project_path is None:
+            self.save_project_as()
+            return
+        project = {
+            "format": "ACMP project", "version": 1, "active_zone": self.points,
+            "no_fly_zones": self.no_fly_zones, "flight_settings": self._preset_values(),
+            "export_settings": {"mission_name": self.mission_name.text(), "thumbnail_title": self.thumbnail_title.text(), "base_layer": self.base_layer.currentText()},
+            "generated_route": self.generated_route, "generated_missions": self.generated_missions,
+            "mission_override": {"force_single_mission": self.force_single_mission},
+        }
+        try:
+            self.current_project_path.write_text(json.dumps(project, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError as error:
+            QMessageBox.critical(self, "Speichern fehlgeschlagen", str(error)); return
+        self.statusBar().showMessage(f"Projekt gespeichert: {self.current_project_path.name}", 5000)
+
+    def new_project(self):
+        self.current_project_path = None
+        self.points, self.no_fly_zones, self.no_fly_names = [], [], []
+        self.generated_route, self.generated_missions = [], []
+        self.mission_name.setText("ACMP_Mapping_Mission")
+        self.thumbnail_title.clear()
+        self.js("clearAll(); clearMission();")
+        self._refresh_geometry_ui()
+        self.statusBar().showMessage("Neues Projekt erstellt.", 3000)
 
     def open_project(self):
         filename, _ = QFileDialog.getOpenFileName(
@@ -785,6 +836,7 @@ class MainWindow(QMainWindow):
             return
 
         self.points, self.no_fly_zones = points, zones
+        self.current_project_path = Path(filename)
         self.generated_route, self.generated_missions = route, missions
         self.force_single_mission = force_single_mission
         self._refresh_geometry_ui()
@@ -862,11 +914,13 @@ class MainWindow(QMainWindow):
         self.coordinates.setPlainText("\n".join(f"{lat:.7f}, {lon:.7f}" for lat, lon in points))
         self.zone_list.clear()
         for index, zone in enumerate(self.no_fly_zones, start=1):
-            self.zone_list.addItem(f"Sperrgebiet {index} · {polygon_area_m2(zone):,.0f} m²".replace(",", "."))
+            name = self.no_fly_names[index-1] if index <= len(self.no_fly_names) else f"Sperrgebiet {index}"
+            self.zone_list.addItem(f"{name} · {polygon_area_m2(zone):,.0f} m²".replace(",", "."))
         self._update_zone_summary()
 
     def _no_fly_changed(self, zones: list):
         self.no_fly_zones = zones
+        self.no_fly_names = (self.no_fly_names + [f"Sperrgebiet {index}" for index in range(len(self.no_fly_names)+1, len(zones)+1)])[:len(zones)]
         self.generated_route = []
         self.generated_missions = []
         self.force_single_mission = False
@@ -884,6 +938,15 @@ class MainWindow(QMainWindow):
         row = self.zone_list.currentRow()
         if row >= 0:
             self.js(f"deleteNoFly({row})")
+
+    def rename_no_fly_zone(self, item):
+        row = self.zone_list.row(item)
+        if row < 0 or row >= len(self.no_fly_names):
+            return
+        name, accepted = QInputDialog.getText(self, "Sperrgebiet umbenennen", "Name:", text=self.no_fly_names[row])
+        if accepted and name.strip():
+            self.no_fly_names[row] = name.strip()
+            self._refresh_geometry_ui()
 
     def _planning_direction(self) -> float:
         if self._canonical(self.direction_mode.currentText()) == "Optimal (kürzeste Flugzeit)":
@@ -1115,10 +1178,42 @@ class MainWindow(QMainWindow):
             return
         QMessageBox.information(self, "Vorschaubild gespeichert", f"JPEG-Vorschau (400 × 300 Pixel) gespeichert:\n{destination}")
 
+    @staticmethod
+    def _point_in_polygon(point, polygon):
+        lat, lon = point; inside = False
+        for index, (a_lat, a_lon) in enumerate(polygon):
+            b_lat, b_lon = polygon[(index + 1) % len(polygon)]
+            if (a_lat > lat) != (b_lat > lat) and lon < (b_lon-a_lon)*(lat-a_lat)/(b_lat-a_lat)+a_lon:
+                inside = not inside
+        return inside
+
+    def _export_validation_errors(self, missions):
+        errors=[]; enforce_area=self.outside_area_mode.currentText()=="Dauerhaft im Flugbereich bleiben"
+        enforce_zones=self.no_fly_mode.currentText()=="Sperrgebiet umfliegen"
+        for mission_number, mission in enumerate(missions, 1):
+            for point_number, point in enumerate(mission, 1):
+                if enforce_area and not self._point_in_polygon(point, self.points):
+                    errors.append(f"Mission {mission_number}, WP {point_number}: außerhalb des Flugbereichs")
+                if enforce_zones and any(self._point_in_polygon(point, zone) for zone in self.no_fly_zones):
+                    errors.append(f"Mission {mission_number}, WP {point_number}: im Sperrgebiet")
+            for first, second in zip(mission, mission[1:]):
+                for step in range(1, 25):
+                    sample=[first[0]+(second[0]-first[0])*step/25, first[1]+(second[1]-first[1])*step/25]
+                    if enforce_area and not self._point_in_polygon(sample, self.points): errors.append(f"Mission {mission_number}: Strecke verlässt Flugbereich"); break
+                    if enforce_zones and any(self._point_in_polygon(sample, zone) for zone in self.no_fly_zones): errors.append(f"Mission {mission_number}: Strecke kreuzt Sperrgebiet"); break
+        return list(dict.fromkeys(errors))
+
     def export_kmz_file(self):
         missions = self._export_missions()
         if not missions:
             return
+        errors=self._export_validation_errors(missions)
+        if errors:
+            text="Die Routenprüfung hat folgende Abweichungen gefunden:\n\n"+"\n".join(errors[:8])
+            if len(errors)>8: text+=f"\n… und {len(errors)-8} weitere."
+            text+="\n\nTrotzdem exportieren?"
+            if QMessageBox.question(self,"Routenprüfung",text,QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:
+                return
         name = "".join(char for char in self.mission_name.text().strip() if char.isalnum() or char in "-_ ") or "ACMP_Mission"
         filename, _ = QFileDialog.getSaveFileName(self, "DJI-KMZ speichern", f"{name}.kmz", "DJI-Mission (*.kmz)")
         if not filename:
