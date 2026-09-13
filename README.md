@@ -4,8 +4,10 @@ ACMP is a desktop tool for drawing mapping areas on an interactive map, planning
 
 > **Early version:** ACMP currently focuses on core area drawing, coverage-route planning, and DJI mission export.
 
-<img src="assets/screenshots/ExampleZone.png" width="300">
-<img src="assets/screenshots/ExampleMission.png" width="300">
+<p float="left">
+    <img src="assets/screenshots/ExampleZone.png" width="300" />
+    <img src="assets/screenshots/ExampleMission.png" width="300" />
+</p>
 
 ## Key Features
 
