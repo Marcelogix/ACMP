@@ -172,10 +172,18 @@ function clearMission(){ missionLayer.clearLayers(); }
 function showMission(route){
   showMissions([route]);
 }
-function showMissions(missions){
+function showMissions(missions, summaries=[]){
   clearMission(); let globalIndex=0; const colors=['#d13c10','#7b3fb2','#087f5b','#9a6700','#1261a0'];
+  const allPoints=missions.flat();
+  const maxLat=Math.max(...allPoints.map(p=>p[0])), maxLon=Math.max(...allPoints.map(p=>p[1]));
+  const latSpan=Math.max(...allPoints.map(p=>p[0]))-Math.min(...allPoints.map(p=>p[0]));
+  const lonSpan=Math.max(...allPoints.map(p=>p[1]))-Math.min(...allPoints.map(p=>p[1]));
   missions.forEach((route,missionIndex)=>{ if(!route || route.length < 2) return; const color=colors[missionIndex%colors.length];
   L.polyline(route,{color:color,weight:3,opacity:.9}).addTo(missionLayer);
+  const center=[maxLat-missionIndex*Math.max(latSpan*.10,.00008),maxLon+Math.max(lonSpan*.08,.00015)];
+  const summary=summaries[missionIndex] || `Mission ${missionIndex+1} · ${route.length} WP`;
+  const label=L.divIcon({className:'',html:`<div style="background:white;color:${color};border:2px solid ${color};border-radius:5px;padding:3px 6px;white-space:nowrap;font:600 12px Segoe UI,Arial;box-shadow:0 1px 4px #555">${summary}</div>`,iconSize:null,iconAnchor:[0,0]});
+  L.marker(center,{icon:label,interactive:false}).addTo(missionLayer);
   route.forEach((p,i)=>{
     globalIndex++;
     const icon=L.divIcon({className:'',html:`<div style="background:${color};color:white;border:2px solid white;border-radius:50%;width:22px;height:22px;line-height:22px;text-align:center;font-size:11px;font-weight:bold;box-shadow:0 1px 3px #444">${missionIndex+1}.${i+1}</div>`,iconSize:[28,22],iconAnchor:[14,11]});
@@ -226,10 +234,10 @@ class MainWindow(QMainWindow):
         self.generated_route: list[list[float]] = []
         self.generated_missions: list[list[list[float]]] = []
         self.force_single_mission = False
-        self.settings = QSettings("ACMP", "Mapping Planner")
+        self.settings = QSettings("ACMP", "Mission Planner")
         self.ui_language = self.settings.value("ui_language", "de")
-        self.setWindowTitle("ACMP – Bereich zeichnen")
-        self.resize(1360, 840)
+        self.setWindowTitle("ACMP – Aerial Capture Mission Planner")
+        self.resize(1500, 900)
         self._build_ui()
 
     def _build_ui(self):
@@ -276,14 +284,14 @@ class MainWindow(QMainWindow):
         splitter.addWidget(sidebar)
         splitter.setStretchFactor(0, 4)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([1030, 330])
+        splitter.setSizes([1020, 480])
         self.setCentralWidget(splitter)
         self._apply_language()
 
     def _build_sidebar(self):
         side = QFrame()
-        side.setMinimumWidth(290)
-        side.setMaximumWidth(420)
+        side.setMinimumWidth(360)
+        side.setMaximumWidth(540)
         layout = QVBoxLayout(side)
         layout.setContentsMargins(8, 8, 8, 8)
         tabs = QTabWidget()
@@ -783,7 +791,7 @@ class MainWindow(QMainWindow):
         self.force_one_button.setVisible(len(missions) > 1 and not force_single_mission)
         self.js(f"setProjectGeometry({json.dumps(points)}, {json.dumps(zones)});")
         if missions:
-            self.js(f"showMissions({json.dumps(missions)});")
+            self._show_missions(missions)
         else:
             self.js("clearMission();")
         self.statusBar().showMessage(f"Projekt geöffnet: {Path(filename).name}", 5000)
@@ -896,6 +904,14 @@ class MainWindow(QMainWindow):
             route = densify_route(route, self.support_spacing.value())
         return route
 
+    def _show_missions(self, missions):
+        labels=[]
+        for index, mission in enumerate(missions, start=1):
+            seconds=estimated_route_seconds(mission, self.speed.value(), self._turn_delay_seconds())
+            minutes, remainder=divmod(round(seconds),60)
+            labels.append(f"Mission {index} · {len(mission)} WP · ≈ {minutes}:{remainder:02d} min")
+        self.js(f"showMissions({json.dumps(missions)}, {json.dumps(labels)});")
+
 
     def _turn_delay_seconds(self) -> float:
         return 3.0 if self._canonical(self.route_mode.currentText()) == "WPML gerade / Punktstopp (nicht garantiert)" else 0.0
@@ -921,7 +937,7 @@ class MainWindow(QMainWindow):
             self.waypoint_warning.setText("⚠ Fehler: Eine Teilmission würde das Wegpunkt- oder Flugzeitlimit überschreiten.")
             self.waypoint_warning.setStyleSheet("color:#b42318;font-weight:600;")
             return
-        self.js(f"showMissions({json.dumps(self.generated_missions)})")
+        self._show_missions(self.generated_missions)
         distance = sum(route_length_m(mission) for mission in self.generated_missions)
         turn_delay_s = self._turn_delay_seconds() * sum(count_direction_changes(mission) for mission in self.generated_missions)
         duration_s = sum(estimated_route_seconds(mission, self.speed.value(), self._turn_delay_seconds()) for mission in self.generated_missions)
@@ -967,7 +983,7 @@ class MainWindow(QMainWindow):
             return
         self.force_single_mission = True
         self.generated_missions = [self.generated_route]
-        self.js(f"showMissions({json.dumps(self.generated_missions)})")
+        self._show_missions(self.generated_missions)
         duration_s = estimated_route_seconds(self.generated_route, self.speed.value(), self._turn_delay_seconds())
         minutes, seconds = divmod(round(duration_s), 60)
         self.mission_summary.setText(
