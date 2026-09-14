@@ -8,10 +8,14 @@ from __future__ import annotations
 
 import json
 import math
+import random
 import re
+import string
 import threading
 import time
+import tempfile
 import zipfile
+from datetime import date
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from html import escape
 from pathlib import Path
@@ -43,6 +47,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QListWidget,
+    QListWidgetItem,
     QTextEdit,
     QTextBrowser,
     QTabWidget,
@@ -168,10 +173,18 @@ const localRules = L.tileLayer.wms('https://geodienste.bfn.de/ogc/wms/schutzgebi
 });
 L.control.layers({'Karte':normal, 'Satellit':satellite}, null, {position:'topleft'}).addTo(map);
 L.control.scale({position:'bottomleft', metric:true, imperial:false, maxWidth:140}).addTo(map);
+let missionLegend=null, missionLegendCollapsed=false;
+try {
+  missionLegend=L.control({position:'topright'});
+  missionLegend.onAdd=()=>{const div=L.DomUtil.create('div');div.id='acmp-mission-legend';div.style.cssText='display:none;background:rgba(255,255,255,.94);border:1px solid #aeb8c4;border-radius:6px;padding:8px 10px;box-shadow:0 1px 5px #555;font:12px Segoe UI,Arial;color:#172b4d;min-width:190px';L.DomEvent.disableClickPropagation(div);return div;};
+  missionLegend.addTo(map);
+} catch(error) { console.error('ACMP-Missionslegende konnte nicht initialisiert werden:', error); }
 let flightAreas = [], activeFlight = [], selectedFlight = -1, flightAreaLayer = L.layerGroup().addTo(map);
 let preview = null, shapePreview = null, shapeStart = null, drawMode = 'none';
 let noFlyZones = [], activeNoFly = [], selectedNoFly = -1, noFlyLayer = L.layerGroup().addTo(map);
 let missionLayer = L.layerGroup().addTo(map);
+let importedMissionLayer = L.layerGroup().addTo(map);
+const importedMissionLayers = new Map();
 let overshootZoneLayer = L.layerGroup().addTo(map);
 let geozoneConflictLayer = L.layerGroup().addTo(map);
 function emitFlightAreas(){ console.log('ACMP_FLIGHT_AREAS:' + JSON.stringify(flightAreas)); }
@@ -289,13 +302,41 @@ function showGeozoneConflicts(features){
   }).addTo(geozoneConflictLayer);
 }
 function goTo(lat,lng,zoom){ map.setView([lat,lng],zoom || 16); L.marker([lat,lng]).addTo(map).bindPopup('Suchergebnis').openPopup(); }
-function clearMission(){ missionLayer.clearLayers(); overshootZoneLayer.clearLayers(); }
+function clearMission(){ missionLayer.clearLayers(); overshootZoneLayer.clearLayers(); clearMissionLegend(); }
+function clearMissionLegend(){const div=document.getElementById('acmp-mission-legend');if(div){div.style.display='none';div.innerHTML='';}}
+function setMissionLegend(summaries,missionCount){
+  const div=document.getElementById('acmp-mission-legend');if(!div)return;
+  if(!missionCount){clearMissionLegend();return;}
+  const colors=['#d13c10','#7b3fb2','#087f5b','#9a6700','#1261a0'];
+  const escape=value=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const rows=summaries.map((summary,index)=>`<div style="display:flex;gap:6px;align-items:flex-start;margin:3px 0"><span style="display:inline-block;width:10px;height:10px;margin-top:2px;border-radius:50%;background:${colors[index%colors.length]}"></span><span>${escape(summary)}</span></div>`).join('');
+  div.innerHTML=`<button id="acmp-mission-legend-toggle" style="border:0;background:transparent;color:#172b4d;font:700 12px Segoe UI,Arial;padding:0;cursor:pointer;width:100%;text-align:left">Missionen ${missionLegendCollapsed?'▸':'▾'}</button><div id="acmp-mission-legend-rows" style="${missionLegendCollapsed?'display:none;':'margin-top:5px'}">${rows}</div>`;
+  document.getElementById('acmp-mission-legend-toggle').onclick=()=>{missionLegendCollapsed=!missionLegendCollapsed;setMissionLegend(summaries,missionCount);};
+  div.style.display='block';
+}
+function showImportedMission(id,route,label){
+  removeImportedMission(id); if(!route||route.length<2)return;
+  const layer=L.layerGroup(), safeLabel=String(label).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  L.polyline(route,{color:'#68707c',weight:4,opacity:.82,dashArray:'8 6'}).bindTooltip(safeLabel,{sticky:true}).addTo(layer);
+  const nameIcon=L.divIcon({className:'',html:`<div style="background:#fff;color:#4d5562;border:2px solid #68707c;border-radius:5px;padding:3px 6px;white-space:nowrap;font:600 12px Segoe UI,Arial;box-shadow:0 1px 4px #555">${safeLabel}</div>`,iconSize:null,iconAnchor:[0,12]});
+  L.marker(route[0],{icon:nameIcon,interactive:false}).addTo(layer);
+  route.forEach((point,index)=>{
+    const icon=L.divIcon({className:'',html:`<div style="background:#68707c;color:white;border:2px solid white;border-radius:50%;width:19px;height:19px;line-height:19px;text-align:center;font-size:9px;font-weight:bold;box-shadow:0 1px 3px #444">${index+1}</div>`,iconSize:[23,19],iconAnchor:[12,10]});
+    L.marker(point,{icon:icon}).bindTooltip(`${safeLabel} · Wegpunkt ${index+1}<br>${point[0].toFixed(6)}, ${point[1].toFixed(6)}`,{sticky:true}).addTo(layer);
+    if(index<route.length-1){const next=route[index+1],mid=[(point[0]+next[0])/2,(point[1]+next[1])/2],dx=next[1]-point[1],dy=next[0]-point[0],rotation=Math.atan2(dx,dy)*180/Math.PI;
+      const arrow=L.divIcon({className:'',html:`<div style="color:#4d5562;font-size:17px;font-weight:bold;transform:rotate(${rotation}deg);text-shadow:0 0 2px white">▲</div>`,iconSize:[18,18],iconAnchor:[9,9]});
+      L.marker(mid,{icon:arrow,interactive:false}).addTo(layer);}
+  });
+  layer.addTo(importedMissionLayer); importedMissionLayers.set(id,layer);
+}
+function removeImportedMission(id){const layer=importedMissionLayers.get(id);if(layer){importedMissionLayer.removeLayer(layer);importedMissionLayers.delete(id);}}
 function setMissionVisible(value){ if(value){ if(!map.hasLayer(missionLayer)) missionLayer.addTo(map); }else if(map.hasLayer(missionLayer)){ map.removeLayer(missionLayer); } }
 function showMission(route){
   showMissions([route]);
 }
 function showMissions(missions, summaries=[], estimatedPaths=[], overshootPaths=[], overshootZone=null){
   clearMission(); let globalIndex=0; const colors=['#d13c10','#7b3fb2','#087f5b','#9a6700','#1261a0'];
+  setMissionLegend(summaries.length ? summaries : missions.map((_route,index)=>`Mission ${index+1}`),missions.length);
   if(overshootZone) L.geoJSON(overshootZone,{style:{color:'#00bcd4',weight:2,fillColor:'#00c8e8',fillOpacity:.18,dashArray:'8 5'},onEachFeature:(_feature,layer)=>layer.bindTooltip('Erweiterte Flugzone für Overshooting (inkl. Sicherheitszugabe)',{sticky:true})}).addTo(overshootZoneLayer);
   overshootPaths.forEach(path=>{
     if(path && path.length>1) L.polyline(path,{color:'#00bcd4',weight:6,opacity:.38}).bindTooltip('Erweiterter Flugbereich / Overshoot',{sticky:true}).addTo(missionLayer);
@@ -374,6 +415,8 @@ class MapView(QWebEngineView):
 
 
 from acmp.services.kmz_exporter import build_dji_kmz
+from acmp.services.rc2_manager import RC2Manager
+from acmp.services.rc2_mission_parser import read_waypoint_path
 from acmp.services.capture_strategy import capabilities_for, choose_capture_plan
 from acmp.services.photogrammetry import coverage_geometry
 from acmp.services.drone_profiles import DRONE_PROFILES, PROFILE_BY_KEY
@@ -398,6 +441,12 @@ class MainWindow(QMainWindow):
         self.preset_dir = Path(__file__).resolve().parents[2] / "presets"
         self.generated_route: list[list[float]] = []
         self.generated_missions: list[list[list[float]]] = []
+        self._rc_import_tempdir = tempfile.TemporaryDirectory(prefix="acmp-rc2-")
+        self._rc_imported_missions: dict[str, tuple[str, list[list[float]], Path]] = {}
+        self._rc_scan_missions = []
+        self._rc_scan_mission_by_uuid = {}
+        self._mission_preview_code_key = None
+        self._mission_preview_codes: list[str] = []
         self.overshoot_paths: list[list[list[float]]] = []
         self.curve_speed_point_keys: set[tuple[float, float]] = set()
         self.reduced_support_points = False
@@ -487,6 +536,12 @@ class MainWindow(QMainWindow):
     def _save_global_setting(self, key: str, value):
         self.settings.setValue(key, value)
         self.settings.sync()
+
+    def _apply_interface_mode(self):
+        """Keep experimental export tools out of the default, simple UI."""
+        advanced = str(self.settings.value("interface_mode", "simple")) == "advanced"
+        if hasattr(self, "preview_group"):
+            self.preview_group.setVisible(advanced)
 
     def _build_sidebar(self):
         side = QFrame()
@@ -768,18 +823,22 @@ class MainWindow(QMainWindow):
         self.image_ratio = QComboBox()
         self.image_ratio.addItems(["4:3", "3:2", "16:9"])
         self.photo_distance = self._number(5, 0.5, 500, 0.5, " m")
+        self.minimum_interval_duration = self._number(2, 0.5, 60, 0.5, " s")
+        self.minimum_interval_duration.setToolTip("Kürzere Kamera-Intervalle werden bei der Berechnung nicht verwendet.")
         self.gimbal_pitch = self._number(-90, -90, 0, 1, " °")
         self.waypoint_action = QComboBox()
         self.waypoint_action.addItems(["Foto bei jedem Wegpunkt", "Foto nach Distanzintervall", "Keine Aktion", "2 s schweben"])
         photo_form.addRow("Seitliche Überlappung:", self.side_overlap)
         photo_form.addRow("Vorwärtsüberlappung:", self.forward_overlap)
         photo_form.addRow("Gewünschter Bildabstand:", self.photo_distance)
+        photo_form.addRow("Minimale Intervalldauer:", self.minimum_interval_duration)
         photo_form.addRow("Kamera-Neigung:", self.gimbal_pitch)
         photo_form.addRow("Aktion:", self.waypoint_action)
         self.capture_plan_label = QLabel()
         self.capture_plan_label.setWordWrap(True)
-        self.capture_plan_label.setStyleSheet("color:#31506f;")
-        photo_form.addRow("Aufnahmeplan:", self.capture_plan_label)
+        self.capture_plan_label.setMinimumHeight(86)
+        self.capture_plan_label.setStyleSheet("color:#243b53;background:#edf4fa;border:1px solid #c8d9e8;border-radius:5px;padding:7px;")
+        photo_form.addRow(self.capture_plan_label)
         flight_layout.addWidget(photo_group)
         limit_group = QGroupBox("Missionsgrenze")
         limit_form = QFormLayout(limit_group)
@@ -859,8 +918,59 @@ class MainWindow(QMainWindow):
         save_kmz.clicked.connect(self.export_kmz_file)
         kmz_layout.addWidget(save_kmz)
         export_layout.addWidget(kmz_group)
-        preview_group = QGroupBox("Vorschaubilder – experimentell")
-        preview_layout = QVBoxLayout(preview_group)
+        rc_export_group = QGroupBox("Live RC Verbindung")
+        rc_export_layout = QVBoxLayout(rc_export_group)
+        self.rc_scan_button = QPushButton("Mission von RC laden")
+        self.rc_scan_button.clicked.connect(self.search_rc2_missions)
+        rc_export_layout.addWidget(self.rc_scan_button)
+        rc_lists = QHBoxLayout()
+        left_column = QVBoxLayout()
+        left_column.addWidget(QLabel("Eigene generierte Missionen"))
+        self.rc_export_mission_list = QListWidget()
+        self.rc_export_mission_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.rc_export_mission_list.setMinimumHeight(100)
+        left_column.addWidget(self.rc_export_mission_list)
+        rc_lists.addLayout(left_column, 1)
+        right_column = QVBoxLayout()
+        right_column.addWidget(QLabel("Missionen auf RC Remote"))
+        self.rc_mission_table = QTableWidget(0, 2)
+        self.rc_mission_table.setHorizontalHeaderLabels(["UUID", "Geändert"])
+        self.rc_mission_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.rc_mission_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.rc_mission_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+        self.rc_mission_table.setAlternatingRowColors(True)
+        self.rc_mission_table.setSortingEnabled(True)
+        self.rc_mission_table.horizontalHeader().setStretchLastSection(True)
+        self.rc_mission_table.setColumnWidth(0, 210)
+        right_column.addWidget(self.rc_mission_table)
+        rc_lists.addLayout(right_column, 1)
+        rc_export_layout.addLayout(rc_lists)
+        rc_export_buttons = QHBoxLayout()
+        self.rc_import_button = QPushButton("RC Mission anzeigen")
+        self.rc_import_button.setEnabled(False)
+        self.rc_import_button.clicked.connect(self.load_rc2_missions)
+        rc_export_buttons.addWidget(self.rc_import_button)
+        self.rc_overwrite_button = QPushButton("RC Mission überschreiben")
+        self.rc_overwrite_button.setEnabled(False)
+        self.rc_overwrite_button.clicked.connect(self.overwrite_selected_missions_on_rc2)
+        rc_export_buttons.addWidget(self.rc_overwrite_button)
+        rc_export_layout.addLayout(rc_export_buttons)
+        rc_export_layout.addWidget(QLabel("Angezeigte Missionen"))
+        self.rc_imported_list = QListWidget()
+        self.rc_imported_list.setMinimumHeight(80)
+        self.rc_imported_list.itemDoubleClicked.connect(self.rename_rc2_import)
+        rc_export_layout.addWidget(self.rc_imported_list)
+        rc_remove_layout = QHBoxLayout()
+        self.rc_remove_import_button = QPushButton("Ausgewählte entfernen")
+        self.rc_remove_import_button.clicked.connect(self.remove_selected_rc2_imports)
+        rc_remove_layout.addWidget(self.rc_remove_import_button)
+        rc_remove_all_button = QPushButton("Alle entfernen")
+        rc_remove_all_button.clicked.connect(self.remove_all_rc2_imports)
+        rc_remove_layout.addWidget(rc_remove_all_button)
+        rc_export_layout.addLayout(rc_remove_layout)
+        export_layout.addWidget(rc_export_group)
+        self.preview_group = QGroupBox("Vorschaubilder – experimentell")
+        preview_layout = QVBoxLayout(self.preview_group)
         preview_note = QLabel("Die Bilddateien werden erstellt, aber DJI Fly übernimmt externe Vorschaubilder möglicherweise nicht.")
         preview_note.setWordWrap(True)
         preview_note.setStyleSheet("color:#9a6700;")
@@ -876,9 +986,11 @@ class MainWindow(QMainWindow):
         save_named_preview.clicked.connect(lambda: self.export_preview_image(True))
         preview_layout.addWidget(save_named_preview)
         preview_layout.addWidget(QLabel("Vorschauformat: JPEG, 400 × 300 Pixel"))
-        export_layout.addWidget(preview_group)
+        export_layout.addWidget(self.preview_group)
         export_layout.addStretch(1)
         tabs.addTab(export, "Exportieren")
+        self._apply_interface_mode()
+
         self._restore_last_flight_settings()
         self._connect_flight_settings_autosave()
         self._update_photogrammetry_geometry()
@@ -972,7 +1084,7 @@ class MainWindow(QMainWindow):
 
     def _capture_plan(self):
         """Translate photogrammetric spacing into the selected drone's capture method."""
-        return choose_capture_plan(self.photo_distance.value(), self.speed.value(), self._drone_capabilities())
+        return choose_capture_plan(self.photo_distance.value(), self.speed.value(), self._drone_capabilities(), self.minimum_interval_duration.value())
 
     def _update_photogrammetry_geometry(self, *_args):
         """Derive route spacing and photo spacing from camera geometry and overlap."""
@@ -1023,6 +1135,7 @@ class MainWindow(QMainWindow):
         consumer = capabilities.requires_manual_interval_capture
         self._set_photo_option_visible(self.waypoint_action, not consumer)
         self._set_photo_option_visible(self.photo_distance, False)
+        self._set_photo_option_visible(self.minimum_interval_duration, consumer)
         self._set_route_option_visible(self.path_spacing, False)
         curve_relevant = not consumer and self._canonical(self.route_mode.currentText()) in {
             "Stützpunkte für geradere Bahnen", "Overshooting"
@@ -1049,24 +1162,21 @@ class MainWindow(QMainWindow):
             self.capture_plan_label.setText(str(error))
             return
         if consumer:
-            expected_overlap = self.forward_overlap.value()
             if english:
                 text = (
-                    "<b>Photo Capture Mode:</b> Manual Interval Capture<br>"
-                    f"<b>Set on Controller:</b> {plan.interval_s:g} s<br>"
-                    f"<b>Required Flight Speed:</b> {plan.flight_speed_mps:.2f} m/s<br>"
-                    f"<b>Expected Photo Distance:</b> {plan.actual_distance_m:.2f} m<br>"
-                    f"<b>Expected Forward Overlap:</b> {expected_overlap:.0f} %<br>"
-                    "<b>Important:</b> Start interval shooting and set the gimbal pitch manually before the mapping section begins."
+                    "<b>Photo capture mode:</b> Interval<br>"
+                    f"<b>Interval duration:</b> {plan.interval_s:g} s<br>"
+                    f"<b>Flight speed:</b> {plan.flight_speed_mps:.2f} m/s<br>"
+                    f"<b>Photo spacing:</b> {plan.actual_distance_m:.2f} m<br>"
+                    f"<b>Path spacing:</b> {self.path_spacing.value():.2f} m"
                 )
             else:
                 text = (
-                    "<b>Fotoaufnahmemodus:</b> Manuelle Intervallaufnahme<br>"
-                    f"<b>Am Controller einstellen:</b> {plan.interval_s:g} s<br>"
-                    f"<b>Erforderliche Fluggeschwindigkeit:</b> {plan.flight_speed_mps:.2f} m/s<br>"
-                    f"<b>Erwarteter Bildabstand:</b> {plan.actual_distance_m:.2f} m<br>"
-                    f"<b>Erwartete Vorwärtsüberlappung:</b> {expected_overlap:.0f} %<br>"
-                    "<b>Wichtig:</b> Intervallaufnahme und Kamera-Neigung vor dem Mapping-Abschnitt manuell am Controller einstellen."
+                    "<b>Fotoaufnahmemodus:</b> Intervall<br>"
+                    f"<b>Intervalldauer:</b> {plan.interval_s:g} s<br>"
+                    f"<b>Fluggeschwindigkeit:</b> {plan.flight_speed_mps:.2f} m/s<br>"
+                    f"<b>Bildabstand:</b> {plan.actual_distance_m:.2f} m<br>"
+                    f"<b>Pfadabstand:</b> {self.path_spacing.value():.2f} m"
                 )
             self.capture_plan_label.setText(text)
         else:
@@ -1128,7 +1238,7 @@ class MainWindow(QMainWindow):
             "reduced_overshoot_points": self.reduced_overshoot_points, "flight_path_preview": self.flight_path_preview.isChecked(),
             "side_overlap": self.side_overlap.value(), "forward_overlap": self.forward_overlap.value(),
             "sensor_format": self.sensor_format.text(), "focal_length": self.focal_length.value(), "image_ratio": self.image_ratio.currentText(),
-            "photo_distance": self.photo_distance.value(), "gimbal_pitch": self.gimbal_pitch.value(),
+            "photo_distance": self.photo_distance.value(), "minimum_interval_duration": self.minimum_interval_duration.value(), "gimbal_pitch": self.gimbal_pitch.value(),
             "waypoint_action": self.waypoint_action.currentText(),
             "max_waypoints": self.max_waypoints.value(), "max_flight_minutes": self.max_flight_minutes.value(),
             "split_mode": self.split_mode.currentText(),
@@ -1174,6 +1284,8 @@ class MainWindow(QMainWindow):
                 field.setValue(float(values[key]))
             if "curve_speed" in values:
                 self.curve_speed.setValue(float(values["curve_speed"]))
+            if "minimum_interval_duration" in values:
+                self.minimum_interval_duration.setValue(float(values["minimum_interval_duration"]))
             if "overshoot_distance" in values:
                 self.overshoot_distance.setValue(float(values["overshoot_distance"]))
             if "sensor_format" in values:
@@ -1228,6 +1340,12 @@ class MainWindow(QMainWindow):
 
         general = QWidget(settings_tabs)
         general_form = QFormLayout(general)
+        interface_mode = QComboBox(general)
+        interface_mode.addItem("Einfach" if not english else "Simple", "simple")
+        interface_mode.addItem("Erweitert" if not english else "Advanced", "advanced")
+        saved_interface_mode = str(self.settings.value("interface_mode", "simple"))
+        interface_mode.setCurrentIndex(1 if saved_interface_mode == "advanced" else 0)
+        general_form.addRow("Bedienmodus" if not english else "Interface mode", interface_mode)
         drone_category = QComboBox(general)
         drone_category.addItem(
             "Consumer (e.g. DJI Mini 5 Pro, Lito)" if english else
@@ -1342,6 +1460,7 @@ class MainWindow(QMainWindow):
             return
         self.settings.setValue("drone_category", drone_category.currentData())
         self.settings.setValue("drone_profile", drone_profile.currentData())
+        self.settings.setValue("interface_mode", interface_mode.currentData())
         self.sensor_format.setText(profile_sensor.text().strip())
         self.focal_length.setValue(profile_focal.value())
         self.image_ratio.setCurrentText(profile_ratio.currentText())
@@ -1351,6 +1470,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("ui_language", language.currentData())
         self.settings.sync()
         self.geozone_zone_method = zone_method.currentData()
+        self._apply_interface_mode()
         self._configure_route_modes()
         self._update_photogrammetry_geometry()
         self.js(f"setGeozoneOpacity({opacity.value()})")
@@ -1368,10 +1488,12 @@ class MainWindow(QMainWindow):
         self.js(f"setGeozones({str(enabled).lower()})")
         # Mit vorhandener Flugfläche darf der Knopf die Prüfung nachträglich starten.
         # Ohne aktivierte UAS-Zonen bleibt er dagegen immer deaktiviert.
-        self.geozone_review_button.setEnabled(bool(enabled) and len(self.points) >= 3)
+        self.geozone_review_button.setEnabled(bool(enabled) and bool(self.flight_areas))
         self.inspect_button.setEnabled(enabled)
         if not enabled and self.inspect_button.isChecked():
             self.inspect_button.setChecked(False)
+        elif enabled and self.flight_areas:
+            QTimer.singleShot(100, self._queue_geozone_check)
 
     def _set_local_rules_enabled(self, enabled: bool):
         self.js(f"setLocalRules({str(enabled).lower()})")
@@ -1486,7 +1608,7 @@ class MainWindow(QMainWindow):
             (self.direction, "direction"), (self.support_spacing, "support_spacing"), (self.overshoot_distance, "overshoot_distance"),
             (self.side_overlap, "side_overlap"), (self.forward_overlap, "forward_overlap"),
             (self.focal_length, "focal_length"),
-            (self.photo_distance, "photo_distance"), (self.gimbal_pitch, "gimbal_pitch"),
+            (self.photo_distance, "photo_distance"), (self.minimum_interval_duration, "minimum_interval_duration"), (self.gimbal_pitch, "gimbal_pitch"),
             (self.max_waypoints, "max_waypoints"), (self.max_flight_minutes, "max_flight_minutes"),
         ]
         for field, key in number_fields:
@@ -1732,24 +1854,31 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, self._queue_geozone_check)
 
     def _queue_geozone_check(self):
-        """Prüft die fertig gezeichnete Flugfläche asynchron gegen dipul-WFS."""
-        if not self.geozones_toggle.isChecked() or len(self.points) < 3:
+        """Prüft alle fertig gezeichneten Flugflächen asynchron gegen dipul-WFS."""
+        if not self.geozones_toggle.isChecked() or not self.flight_areas:
             return
         self._geozone_check_id += 1
         check_id = self._geozone_check_id
-        points = [(float(lat), float(lon)) for lat, lon in self.points]
-        self.statusBar().showMessage("Prüfe UAS-Geozonen für die Flugfläche …", 2500)
+        areas = [[(float(lat), float(lon)) for lat, lon in area] for area in self.flight_areas]
+        self.statusBar().showMessage("Prüfe UAS-Geozonen für alle Flugbereiche …", 2500)
         threading.Thread(
             target=self._run_geozone_check,
-            args=(check_id, points),
+            args=(check_id, areas),
             name="acmp-geozone-check",
             daemon=True,
         ).start()
 
-    def _run_geozone_check(self, check_id: int, points: list[tuple[float, float]]):
+    def _run_geozone_check(self, check_id: int, areas: list[list[tuple[float, float]]]):
         """Läuft außerhalb des UI-Threads; ein WFS-Ausfall blockiert die Karte nicht."""
         try:
-            hits = self._query_geozone_features(points)
+            hits = []
+            seen = set()
+            for points in areas:
+                for feature in self._query_geozone_features(points):
+                    key = json.dumps(feature.get("geometry"), sort_keys=True, separators=(",", ":"))
+                    if key not in seen:
+                        seen.add(key)
+                        hits.append(feature)
         except (OSError, ValueError, UnicodeError):
             hits = []
         self.geozone_check_finished.emit(check_id, hits)
@@ -2050,7 +2179,7 @@ class MainWindow(QMainWindow):
                 (self.direction, "direction"), (self.support_spacing, "support_spacing"), (self.overshoot_distance, "overshoot_distance"),
                 (self.side_overlap, "side_overlap"), (self.forward_overlap, "forward_overlap"),
                 (self.focal_length, "focal_length"),
-                (self.photo_distance, "photo_distance"), (self.gimbal_pitch, "gimbal_pitch"),
+                (self.photo_distance, "photo_distance"), (self.minimum_interval_duration, "minimum_interval_duration"), (self.gimbal_pitch, "gimbal_pitch"),
                 (self.max_waypoints, "max_waypoints"), (self.max_flight_minutes, "max_flight_minutes"),
             ]
             for field, key in number_fields:
@@ -2083,7 +2212,7 @@ class MainWindow(QMainWindow):
     def _connect_flight_settings_autosave(self):
         number_fields = [
             self.altitude, self.speed, self.curve_speed, self.path_spacing, self.direction, self.support_spacing, self.overshoot_distance,
-            self.side_overlap, self.forward_overlap, self.focal_length, self.photo_distance, self.gimbal_pitch,
+            self.side_overlap, self.forward_overlap, self.focal_length, self.photo_distance, self.minimum_interval_duration, self.gimbal_pitch,
             self.max_waypoints, self.max_flight_minutes,
         ]
         combo_fields = [
@@ -2092,7 +2221,7 @@ class MainWindow(QMainWindow):
         ]
         for field in number_fields:
             field.valueChanged.connect(self._save_last_flight_settings)
-        for field in (self.speed, self.photo_distance, self.forward_overlap):
+        for field in (self.speed, self.photo_distance, self.minimum_interval_duration, self.forward_overlap):
             field.valueChanged.connect(self._update_capture_strategy_ui)
         for field in (self.altitude, self.gimbal_pitch, self.side_overlap, self.forward_overlap, self.focal_length):
             field.valueChanged.connect(self._update_photogrammetry_geometry)
@@ -2117,7 +2246,7 @@ class MainWindow(QMainWindow):
         if not self.geozones_toggle.isChecked():
             return
         if not self._last_geozone_features:
-            if len(self.points) >= 3:
+            if self.flight_areas:
                 self._queue_geozone_check()
             return
         if self._geozone_review_dialog and self._geozone_review_dialog.isVisible():
@@ -2436,6 +2565,7 @@ class MainWindow(QMainWindow):
         return {"type": "Feature", "properties": {"kind": "overshoot_zone"}, "geometry": geometry}
 
     def _show_missions(self, missions):
+        self._refresh_rc_export_list(missions)
         labels=[]
         for index, mission in enumerate(missions, start=1):
             seconds=estimated_route_seconds(mission, self._effective_speed(), self._turn_delay_seconds())
@@ -2585,16 +2715,43 @@ class MainWindow(QMainWindow):
         )
         return True
 
-    def _preview_image(self, missions: list[list[list[float]]], include_title: bool) -> QImage:
+    def _mission_preview_codes_for(self, missions) -> list[str]:
+        """Assign one random letter per flight area and number its split parts."""
+        key = tuple(tuple((round(point[0], 8), round(point[1], 8)) for point in mission) for mission in missions)
+        if key == self._mission_preview_code_key:
+            return self._mission_preview_codes
+        groups = []
+        for mission in missions:
+            start = mission[0]
+            group = next((index for index, area in enumerate(self.flight_areas) if self._point_in_polygon(start, area)), None)
+            if group is None:
+                # Overshooting can put the first visible point outside an area;
+                # the nearest area centroid remains a stable fallback.
+                group = min(range(len(self.flight_areas)), key=lambda index: sum((start[axis] - sum(point[axis] for point in self.flight_areas[index]) / len(self.flight_areas[index])) ** 2 for axis in (0, 1))) if self.flight_areas else 0
+            groups.append(group)
+        shuffled_letters = list(string.ascii_uppercase)
+        random.SystemRandom().shuffle(shuffled_letters)
+        letters = {group: shuffled_letters[index % len(shuffled_letters)] for index, group in enumerate(dict.fromkeys(groups))}
+        counts = {}
+        codes = []
+        for group in groups:
+            counts[group] = counts.get(group, 0) + 1
+            codes.append(f"{letters[group]}{counts[group]}")
+        self._mission_preview_code_key, self._mission_preview_codes = key, codes
+        return codes
+
+    def _preview_image(self, missions: list[list[list[float]]], include_title: bool, title_override: str | None = None, surrounding_missions=None) -> QImage:
         """Rendert eine kompakte, DJI-ähnliche Missionsübersicht als 400×300-JPEG."""
         width, height, margin = 400, 300, 24
         image = QImage(width, height, QImage.Format.Format_RGB32)
         image.fill(QColor("#f7f9fc"))
-        all_points = [point for area in self.flight_areas for point in area] + [point for zone in self.no_fly_zones for point in zone] + [point for mission in missions for point in mission]
+        surrounding_missions = surrounding_missions or []
+        all_points = ([point for area in self.flight_areas for point in area] + [point for zone in self.no_fly_zones for point in zone]
+                      + [point for mission in surrounding_missions for point in mission] + [point for mission in missions for point in mission])
         min_lat, max_lat = min(point[0] for point in all_points), max(point[0] for point in all_points)
         min_lon, max_lon = min(point[1] for point in all_points), max(point[1] for point in all_points)
         lat_span, lon_span = max(max_lat - min_lat, 1e-8), max(max_lon - min_lon, 1e-8)
-        title_height = 60 if include_title else 0
+        title_height = 78 if include_title and title_override else 60 if include_title else 0
         draw_top = margin + title_height
         available_width, available_height = width - 2 * margin, height - draw_top - margin
         scale = min(available_width / lon_span, available_height / lat_span)
@@ -2622,7 +2779,7 @@ class MainWindow(QMainWindow):
         painter = QPainter(image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         if include_title:
-            title = self.thumbnail_title.text().strip() or self.mission_name.text().strip() or "ACMP-Mission"
+            title = title_override or self.thumbnail_title.text().strip() or self.mission_name.text().strip() or "ACMP-Mission"
             painter.setPen(QColor("#172b4d"))
             title_width = width - 2 * margin
             # Select the largest font that fits the complete title into the
@@ -2630,16 +2787,20 @@ class MainWindow(QMainWindow):
             # display-DPI settings.
             font = QFont("Segoe UI")
             font.setBold(True)
-            for pixel_size in range(title_height - 8, 0, -1):
+            for pixel_size in range((18 if title_override else title_height - 8), 0, -1):
                 font.setPixelSize(pixel_size)
-                if QFontMetrics(font).horizontalAdvance(title) <= title_width:
+                if max(QFontMetrics(font).horizontalAdvance(line) for line in title.splitlines()) <= title_width:
                     break
             painter.setFont(font)
-            painter.drawText(margin, 7, title_width, title_height - 8, Qt.AlignmentFlag.AlignCenter, title)
+            painter.drawText(margin, 7, title_width, title_height - 8, Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, title)
         for area in self.flight_areas:
             draw_area(painter, area, QColor(65, 150, 255, 58), "#1261a0", 2)
         for zone in self.no_fly_zones:
             draw_area(painter, zone, QColor(220, 38, 38, 75), "#c92525", 2)
+        for surrounding in surrounding_missions:
+            painter.setPen(QPen(QColor("#a7afb8"), 2, Qt.PenStyle.DashLine))
+            for first, second in zip(surrounding, surrounding[1:]):
+                painter.drawLine(int(project(first)[0]), int(project(first)[1]), int(project(second)[0]), int(project(second)[1]))
         colors = ["#d13c10", "#7b3fb2", "#087f5b", "#9a6700", "#1261a0"]
         for mission_index, mission in enumerate(missions):
             color = QColor(colors[mission_index % len(colors)])
@@ -2737,6 +2898,148 @@ class MainWindow(QMainWindow):
         else:
             message = f"{len(missions)} DJI-WPML-KMZ-Teilmissionen gespeichert:\n{destination.parent}"
         QMessageBox.information(self, "KMZ gespeichert", message)
+
+    def _refresh_rc_export_list(self, missions=None):
+        if not hasattr(self, "rc_export_mission_list"):
+            return
+        missions = self.generated_missions if missions is None else missions
+        self.rc_export_mission_list.clear()
+        for index, mission in enumerate(missions, start=1):
+            item = QListWidgetItem(f"Mission {index} · {len(mission)} Wegpunkte")
+            item.setData(Qt.ItemDataRole.UserRole, index - 1)
+            self.rc_export_mission_list.addItem(item)
+        self.rc_overwrite_button.setEnabled(bool(missions) and bool(self._rc_scan_missions))
+
+    def overwrite_selected_missions_on_rc2(self):
+        source_indexes = sorted(item.data(Qt.ItemDataRole.UserRole) for item in self.rc_export_mission_list.selectedItems())
+        target_rows = sorted({index.row() for index in self.rc_mission_table.selectedIndexes()})
+        if not source_indexes or not target_rows:
+            QMessageBox.information(self, "Auswahl fehlt", "Wähle links Plan-Missionen und rechts dieselbe Anzahl RC2-Missionen aus.")
+            return
+        if len(source_indexes) != len(target_rows):
+            QMessageBox.warning(self, "Auswahl passt nicht", "Zum Überschreiben muss jeder Plan-Mission genau ein RC2-Missionsslot zugeordnet sein.")
+            return
+        manager = RC2Manager()
+        staging = Path(self._rc_import_tempdir.name) / "rc2-overwrite"
+        staging.mkdir(parents=True, exist_ok=True)
+        capture_plan = self._capture_plan()
+        capture_text = f"{capture_plan.interval_s:g}s" if capture_plan.interval_s else f"{self.photo_distance.value():g}m"
+        preview_codes = self._mission_preview_codes_for(self.generated_missions)
+        mission_date = date.today().strftime("%d.%m.%Y")
+        self.rc_overwrite_button.setEnabled(False)
+        uploaded, problems = 0, []
+        for source_index, target_row in zip(source_indexes, target_rows):
+            target_uuid = self.rc_mission_table.item(target_row, 0).text()
+            target = self._rc_scan_mission_by_uuid[target_uuid]
+            kmz_path = staging / f"{target.uuid}.kmz"
+            preview_path = staging / f"{target.uuid}.jpg"
+            preview_title = f"{preview_codes[source_index]}\n{mission_date}\n{capture_text}, {self.gimbal_pitch.value():+g}°"
+            try:
+                self._write_kmz(kmz_path, self.generated_missions[source_index])
+                surrounding = [mission for mission_index, mission in enumerate(self.generated_missions) if mission_index != source_index]
+                if not self._preview_image([self.generated_missions[source_index]], True, preview_title, surrounding).save(str(preview_path), "JPEG", 95):
+                    raise OSError("JPEG-Vorschau konnte nicht erstellt werden.")
+                manager.overwrite_mission_bundle(target.device_name, target.uuid, kmz_path, preview_path)
+                uploaded += 1
+            except (OSError, ValueError) as error:
+                problems.append(f"Mission {source_index + 1} → {target.uuid}: {error}")
+        self.rc_overwrite_button.setEnabled(bool(self.generated_missions) and bool(self._rc_scan_missions))
+        if uploaded:
+            self.statusBar().showMessage(f"{uploaded} DJI-Fly-Missionsslot(s) überschrieben. RC2 trennen und DJI Fly neu öffnen.", 8000)
+        if problems:
+            QMessageBox.warning(self, "Einige Missionen konnten nicht überschrieben werden", "\n".join(problems))
+        elif uploaded:
+            QMessageBox.information(self, "RC2-Überschreiben abgeschlossen", f"{uploaded} bestehende DJI-Fly-Mission(en) wurden aktualisiert. DJI Fly anschließend neu öffnen.")
+
+    def search_rc2_missions(self):
+        """Populate the existing DJI Fly mission slots from the MTP/WPD namespace."""
+        self.rc_scan_button.setEnabled(False)
+        self.statusBar().showMessage("Suche DJI-Fly-Missionsslots auf dem RC2 …")
+        QApplication.processEvents()
+        result = RC2Manager().find_waypoint_missions()
+        self.rc_scan_button.setEnabled(True)
+        self.rc_mission_table.setSortingEnabled(False)
+        self.rc_mission_table.setRowCount(0)
+        self._rc_scan_missions = list(result.missions)
+        self._rc_scan_mission_by_uuid = {mission.uuid: mission for mission in result.missions}
+        self.rc_import_button.setEnabled(bool(result.missions) and not result.error)
+        self.rc_overwrite_button.setEnabled(bool(result.missions) and bool(self.generated_missions) and not result.error)
+        if result.error:
+            self.statusBar().showMessage(result.error, 8000)
+            return
+        if not result.devices:
+            self.statusBar().showMessage("Kein RC2-Waypoint-Verzeichnis gefunden. RC2 entsperren und USB-Dateiübertragung aktivieren.", 8000)
+            return
+        for mission in result.missions:
+            row = self.rc_mission_table.rowCount()
+            self.rc_mission_table.insertRow(row)
+            for column, value in enumerate((mission.uuid, mission.modified or "—")):
+                self.rc_mission_table.setItem(row, column, QTableWidgetItem(str(value)))
+        self.rc_mission_table.setSortingEnabled(True)
+        device_text = ", ".join(result.devices)
+        if result.missions:
+            self.statusBar().showMessage(f"{len(result.missions)} RC2-Missionsslot(s) auf {device_text} gefunden.", 6000)
+        else:
+            self.statusBar().showMessage(f"Waypoint-Verzeichnis auf {device_text} gefunden, aber keine DJI-Fly-Missionen darin.", 6000)
+
+    def load_rc2_missions(self):
+        rows = sorted({index.row() for index in self.rc_mission_table.selectedIndexes()})
+        if not rows:
+            QMessageBox.information(self, "Keine Mission ausgewählt", "Bitte wähle mindestens eine RC2-Mission aus.")
+            return
+        self.rc_import_button.setEnabled(False)
+        loaded, problems = 0, []
+        for row in rows:
+            mission_uuid = self.rc_mission_table.item(row, 0).text()
+            mission = self._rc_scan_mission_by_uuid[mission_uuid]
+            identifier = f"{mission.device_name}|{mission.uuid}|{mission.kmz_name}"
+            if identifier in self._rc_imported_missions:
+                continue
+            # Explorer/WPD CopyHere keeps the original source name. DJI's KMZ
+            # name already contains its UUID, so it is unique in our temp dir.
+            destination = Path(self._rc_import_tempdir.name) / mission.kmz_name
+            try:
+                RC2Manager().download_mission(mission, destination)
+                path = read_waypoint_path(destination)
+            except (OSError, ValueError, zipfile.BadZipFile) as error:
+                problems.append(f"{mission.kmz_name}: {error}")
+                continue
+            label = f"{mission.kmz_name} · {len(path)} WP"
+            self._rc_imported_missions[identifier] = (label, path, destination)
+            list_item = QListWidgetItem(label)
+            list_item.setData(Qt.ItemDataRole.UserRole, identifier)
+            self.rc_imported_list.addItem(list_item)
+            self.js(f"showImportedMission({json.dumps(identifier)}, {json.dumps(path)}, {json.dumps(label)});")
+            loaded += 1
+        self.rc_import_button.setEnabled(bool(self._rc_scan_missions))
+        if loaded:
+            self.statusBar().showMessage(f"{loaded} Mission(en) geladen; graue Pfade sind auf der Karte sichtbar.", 6000)
+        if problems:
+            QMessageBox.warning(self, "Einige Missionen konnten nicht geladen werden", "\n".join(problems))
+
+    def remove_selected_rc2_imports(self):
+        for item in self.rc_imported_list.selectedItems():
+            identifier = item.data(Qt.ItemDataRole.UserRole)
+            self.js(f"removeImportedMission({json.dumps(identifier)});")
+            self._rc_imported_missions.pop(identifier, None)
+            self.rc_imported_list.takeItem(self.rc_imported_list.row(item))
+
+    def rename_rc2_import(self, item: QListWidgetItem):
+        identifier = item.data(Qt.ItemDataRole.UserRole)
+        current_label, path, destination = self._rc_imported_missions[identifier]
+        name, accepted = QInputDialog.getText(self, "Importierte Mission benennen", "Anzeigename auf Karte und in der Liste:", text=current_label)
+        if not accepted or not name.strip():
+            return
+        label = name.strip()
+        self._rc_imported_missions[identifier] = (label, path, destination)
+        item.setText(label)
+        self.js(f"showImportedMission({json.dumps(identifier)}, {json.dumps(path)}, {json.dumps(label)});")
+
+    def remove_all_rc2_imports(self):
+        for identifier in self._rc_imported_missions:
+            self.js(f"removeImportedMission({json.dumps(identifier)});")
+        self._rc_imported_missions.clear()
+        self.rc_imported_list.clear()
 
     def use_current_location(self):
         self.js("""

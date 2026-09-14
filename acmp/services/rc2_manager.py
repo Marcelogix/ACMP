@@ -82,11 +82,18 @@ function Copy-IntoFolder($parent, $localPath) {{
   if ($null -eq $sourceFolder) {{ throw "Lokaler Quellordner nicht verfügbar: $localPath" }}
   $source = $sourceFolder.ParseName($fileName)
   if ($null -eq $source) {{ throw "Lokale Datei nicht verfügbar: $fileName" }}
-  # Explorer handles an existing name as a replacement when confirmation is
-  # suppressed. This avoids the MTP recycle/delete confirmation dialog.
-  $parent.CopyHere($source, 1044) # FOF_SILENT + FOF_NOCONFIRMATION + FOF_NOERRORUI
-  Start-Sleep -Milliseconds 700
-  if ($null -eq $parent.ParseName($fileName)) {{ throw "Upload zum RC2 fehlgeschlagen: $fileName" }}
+  # The RC2's MTP shell provider cancels silent replacements instead of
+  # overwriting. Delete first, then wait until the provider exposes the slot
+  # as free before copying the replacement.
+  $oldFile = $parent.ParseName($fileName)
+  if ($null -ne $oldFile) {{
+    $oldFile.InvokeVerb('delete')
+    for ($attempt = 0; $attempt -lt 50; $attempt++) {{ if ($null -eq $parent.ParseName($fileName)) {{ break }}; Start-Sleep -Milliseconds 200 }}
+    if ($null -ne $parent.ParseName($fileName)) {{ throw "Bestehende RC2-Datei konnte nicht ersetzt werden: $fileName" }}
+  }}
+  $parent.CopyHere($source, 20)
+  for ($attempt = 0; $attempt -lt 100; $attempt++) {{ if ($null -ne $parent.ParseName($fileName)) {{ return }}; Start-Sleep -Milliseconds 200 }}
+  throw "Upload zum RC2 hat zu lange gedauert: $fileName"
 }}
 $computer = $shell.Namespace(17); $deviceItem = @($computer.Items() | Where-Object {{ $_.Name -eq {device} }} | Select-Object -First 1)
 if ($null -eq $deviceItem) {{ throw 'Der RC2 ist nicht mehr verbunden.' }}

@@ -25,7 +25,7 @@ CONSUMER_CAPABILITIES = DroneCapabilities(
     category="consumer",
     supports_wpml_distance_trigger=False,
     supports_wpml_time_trigger=False,
-    supports_wpml_gimbal_pitch=False,
+    supports_wpml_gimbal_pitch=True,
     requires_manual_interval_capture=True,
     # Conservative, commonly available DJI Fly interval choices.  Model
     # profiles can replace this tuple without changing UI or export code.
@@ -67,14 +67,16 @@ def choose_capture_plan(
     requested_distance_m: float,
     preferred_speed_mps: float,
     capabilities: DroneCapabilities,
+    minimum_interval_s: float = 0.0,
 ) -> CapturePlan:
-    """Choose the feasible interval/speed pair closest to mapping speed.
+    """Choose an allowed interval whose mapping speed matches the preference.
 
-    Feasible pairs are always preferred.  If none is feasible (normally only
-    possible for an unusually small/large requested spacing), choose the pair
-    whose required speed is closest to the allowed range and clamp it.  This
-    makes the resulting spacing explicit rather than silently choosing an
-    unsuitable interval.
+    ``minimum_interval_s`` is a hard camera constraint.  Among the remaining
+    controller intervals, matching the requested mapping speed takes priority;
+    the resulting photo spacing is the tie-breaker.  This lets a 2 s-capable
+    camera use 2 s / 6.3 m/s instead of an unnecessarily slower 3 s / 4.2 m/s
+    for a roughly 12.6 m image spacing.  If a short interval would be too fast,
+    a longer interval naturally lowers the flight speed.
     """
     distance = max(0.01, float(requested_distance_m))
     preferred = min(max(float(preferred_speed_mps), capabilities.min_mapping_speed), capabilities.max_mapping_speed)
@@ -83,18 +85,19 @@ def choose_capture_plan(
 
     candidates = []
     for interval in capabilities.supported_photo_intervals:
+        if interval < max(0.0, float(minimum_interval_s)):
+            continue
         required_speed = distance / interval
         clamped_speed = min(max(required_speed, capabilities.min_mapping_speed), capabilities.max_mapping_speed)
         # WPML serialises waypoint speed with one decimal; choose and report
         # the same executable value, not a misleading higher precision value.
         clamped_speed = round(clamped_speed, 1)
         feasible = capabilities.min_mapping_speed <= required_speed <= capabilities.max_mapping_speed
-        # Prioritise exact requested spacing, then the speed closest to the
-        # user's preferred mapping speed.  Infeasible choices expose their
-        # resulting spacing and are only used as a fallback.
+        # The speed is the primary operator preference once the camera's
+        # minimum interval is honoured. Photo spacing breaks speed ties.
         actual_distance = clamped_speed * interval
-        candidates.append((not feasible, abs(actual_distance - distance), abs(clamped_speed - preferred), interval, clamped_speed))
+        candidates.append((not feasible, abs(clamped_speed - preferred), abs(actual_distance - distance), interval, clamped_speed))
     if not candidates:
-        raise ValueError("Für dieses Drohnenprofil sind keine Fotointervalle hinterlegt.")
+        raise ValueError("Für die gewählte minimale Intervalldauer ist kein unterstütztes Fotointervall hinterlegt.")
     _, _, _, interval, speed = min(candidates)
     return CapturePlan("manual_interval", distance, speed, interval)
