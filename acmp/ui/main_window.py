@@ -69,7 +69,7 @@ UI_EN = {
     "Max. Wegpunkte:": "Max. waypoints:", "Max. Flugzeit / Mission:": "Max. flight time / mission:", "Aufteilung auf Missionen:": "Split across missions:",
     "Bei Flugende:": "At flight end:", "Bei Signalverlust:": "On signal loss:",
     "Außerhalb des Flugbereichs:": "Outside flight area:", "Bei Sperrgebieten:": "For no-fly zones:",
-    "Route generieren und auf Karte zeigen": "Generate route and show on map",
+    "Route generieren und auf Karte zeigen": "Generate route and show on map", "Route verstecken": "Hide route", "Route zeigen": "Show route",
     "Eine Mission erzwingen (Grenzen überschreiten)": "Force one mission (exceed limits)", "Routenanzeige löschen": "Clear route display",
     "Exportieren & Speichern": "Export & save", "KMZ-Datei speichern": "Save KMZ file", "KMZ-Dateiname / Missionsname": "KMZ filename / mission name",
     "KMZ-Datei speichern …": "Save KMZ file …", "Vorschaubild speichern …": "Save preview image …", "Text im Vorschaubild": "Preview-image text",
@@ -78,16 +78,17 @@ UI_EN = {
     "Missionsname": "Mission name",
     "West → Ost (0°)": "West → East (0°)", "Ost → West (180°)": "East → West (180°)",
     "Süd → Nord (90°)": "South → North (90°)", "Nord → Süd (270°)": "North → South (270°)",
-    "Eigene Gradzahl": "Custom angle", "Optimal (längste Kante)": "Optimal (longest edge)", "Optimal (kürzeste Flugzeit)": "Optimal (shortest flight time)",
-    "Standard (glatte Kurven)": "Standard (smooth curves)", "WPML gerade / Punktstopp (nicht garantiert)": "WPML straight / point stop (not guaranteed)",
-    "Stützpunkte für geradere Bahnen": "Support points for straighter paths", "Foto bei jedem Wegpunkt": "Photo at every waypoint",
+    "Eigene Gradzahl": "Custom angle", "Optimal (längste Kante)": "Optimal (longest edge)", "Optimal (längste Kante, umgekehrt)": "Optimal (longest edge, reversed)", "Optimal (kürzeste Flugzeit)": "Optimal (shortest flight time)",
+    "Standard (DJI-Näherung: glatte Kurven)": "Standard (DJI approximation: smooth curves)", "WPML gerade / Punktstopp (nicht garantiert)": "WPML straight / point stop (not guaranteed)",
+    "Stützpunkte für geradere Bahnen": "Support points for straighter paths", "Overshooting": "Overshooting",
+    "Geschätzte DJI-Flugbahn anzeigen (Centripetal-Catmull-Rom; Näherung)": "Show estimated DJI flight path (centripetal Catmull-Rom; approximation)", "Foto bei jedem Wegpunkt": "Photo at every waypoint",
     "Foto nach Distanzintervall": "Photo at distance interval", "Keine Aktion": "No action", "2 s schweben": "Hover 2 s", "Was ist hier?": "What's here?",
     "Konflikte …": "Conflicts …",
     "UAS-Geozonen": "UAS geozones", "UAS-Geozonen (Deutschland)": "UAS geozones (Germany)",
     "Lokale Bestimmungen": "Local rules", "Lokale Bestimmungen (Deutschland)": "Local rules (Germany)",
     "Flugbereich": "Flight area", "Auf Flugbereich zoomen": "Zoom to flight area",
     "Routenparameter": "Route parameters",
-    "Außerhalb erlaubt": "Outside flight area allowed", "Dauerhaft im Flugbereich bleiben": "Remain inside flight area",
+    "Außerhalb erlaubt": "Outside flight area allowed", "Im Flugbereich bleiben (exkl. Overshooting)": "Remain inside flight area (except Overshooting)",
     "Sperrgebiet umfliegen": "Avoid no-fly zones", "Sperrgebiet durchfliegen": "Allow flight through no-fly zones",
     "Maximal ausnutzen": "Use maximum", "Gleichmäßig verteilen": "Distribute evenly",
     "Rückkehr zum Startpunkt (Home)": "Return to home", "Schweben am letzten Wegpunkt": "Hover at last waypoint",
@@ -116,7 +117,8 @@ GEOZONE_LAYERS = (
     "naturschutzgebiete,polizei,temporaere_betriebseinschraenkungen,"
     "vogelschutzgebiete,wohngrundstuecke"
 )
-from shapely.geometry import Polygon, shape, mapping
+from shapely.geometry import LineString, Polygon, shape, mapping
+from shapely.ops import unary_union
 GEOZONE_LABELS = {
     "bahnanlagen": "Bahnanlagen", "behoerden": "Behörden",
     "bundesautobahnen": "Bundesautobahnen", "bundesstrassen": "Bundesstraßen",
@@ -166,6 +168,7 @@ L.control.scale({position:'bottomleft', metric:true, imperial:false, maxWidth:14
 let points = [], polygon = null, preview = null, shapePreview = null, shapeStart = null, markers = [], drawMode = 'none';
 let noFlyZones = [], activeNoFly = [], selectedNoFly = -1, noFlyLayer = L.layerGroup().addTo(map);
 let missionLayer = L.layerGroup().addTo(map);
+let overshootZoneLayer = L.layerGroup().addTo(map);
 let geozoneConflictLayer = L.layerGroup().addTo(map);
 function emit(){ console.log('ACMP_POLYGON:' + JSON.stringify(points)); }
 function emitNoFly(){ console.log('ACMP_NO_FLY:' + JSON.stringify(noFlyZones)); }
@@ -271,18 +274,25 @@ function showGeozoneConflicts(features){
   }).addTo(geozoneConflictLayer);
 }
 function goTo(lat,lng,zoom){ map.setView([lat,lng],zoom || 16); L.marker([lat,lng]).addTo(map).bindPopup('Suchergebnis').openPopup(); }
-function clearMission(){ missionLayer.clearLayers(); }
+function clearMission(){ missionLayer.clearLayers(); overshootZoneLayer.clearLayers(); }
+function setMissionVisible(value){ if(value){ if(!map.hasLayer(missionLayer)) missionLayer.addTo(map); }else if(map.hasLayer(missionLayer)){ map.removeLayer(missionLayer); } }
 function showMission(route){
   showMissions([route]);
 }
-function showMissions(missions, summaries=[]){
+function showMissions(missions, summaries=[], estimatedPaths=[], overshootPaths=[], overshootZone=null){
   clearMission(); let globalIndex=0; const colors=['#d13c10','#7b3fb2','#087f5b','#9a6700','#1261a0'];
+  if(overshootZone) L.geoJSON(overshootZone,{style:{color:'#00bcd4',weight:2,fillColor:'#00c8e8',fillOpacity:.18,dashArray:'8 5'},onEachFeature:(_feature,layer)=>layer.bindTooltip('Erweiterte Flugzone für Overshooting (inkl. Sicherheitszugabe)',{sticky:true})}).addTo(overshootZoneLayer);
+  overshootPaths.forEach(path=>{
+    if(path && path.length>1) L.polyline(path,{color:'#00bcd4',weight:6,opacity:.38}).bindTooltip('Erweiterter Flugbereich / Overshoot',{sticky:true}).addTo(missionLayer);
+  });
   const allPoints=missions.flat();
   const maxLat=Math.max(...allPoints.map(p=>p[0])), maxLon=Math.max(...allPoints.map(p=>p[1]));
   const latSpan=Math.max(...allPoints.map(p=>p[0]))-Math.min(...allPoints.map(p=>p[0]));
   const lonSpan=Math.max(...allPoints.map(p=>p[1]))-Math.min(...allPoints.map(p=>p[1]));
   missions.forEach((route,missionIndex)=>{ if(!route || route.length < 2) return; const color=colors[missionIndex%colors.length];
-  L.polyline(route,{color:color,weight:3,opacity:.9}).addTo(missionLayer);
+  const estimated=estimatedPaths[missionIndex];
+  L.polyline(route,estimated ? {color:'#667085',weight:2,opacity:.7,dashArray:'7 7'} : {color:color,weight:3,opacity:.9}).addTo(missionLayer);
+  if(estimated && estimated.length>1) L.polyline(estimated,{color:color,weight:4,opacity:.92}).bindTooltip('Geschätzte DJI-Flugbahn (Centripetal-Catmull-Rom-Näherung)',{sticky:true}).addTo(missionLayer);
   const center=[maxLat-missionIndex*Math.max(latSpan*.10,.00008),maxLon+Math.max(lonSpan*.08,.00015)];
   const summary=summaries[missionIndex] || `Mission ${missionIndex+1} · ${route.length} WP`;
   const label=L.divIcon({className:'',html:`<div style="background:white;color:${color};border:2px solid ${color};border-radius:5px;padding:3px 6px;white-space:nowrap;font:600 12px Segoe UI,Arial;box-shadow:0 1px 4px #555">${summary}</div>`,iconSize:null,iconAnchor:[0,0]});
@@ -344,7 +354,7 @@ class MapView(QWebEngineView):
 
 from acmp.services.kmz_exporter import build_dji_kmz
 from acmp.services.route_planner import (
-    count_direction_changes, densify_route, estimated_route_seconds, generate_lawnmower_route,
+    add_overshoot_turns, centripetal_catmull_rom_route, count_direction_changes, densify_route, estimated_route_seconds, generate_lawnmower_route,
     optimal_direction_deg, plan_missions, polygon_area_m2, route_length_m, shortest_route_direction_deg,
 )
 
@@ -362,6 +372,10 @@ class MainWindow(QMainWindow):
         self.preset_dir = Path(__file__).resolve().parents[2] / "presets"
         self.generated_route: list[list[float]] = []
         self.generated_missions: list[list[list[float]]] = []
+        self.overshoot_paths: list[list[list[float]]] = []
+        self.reduced_support_points = False
+        self.keep_support_route_inside = False
+        self.reduced_overshoot_points = False
         self.force_single_mission = False
         self._geozone_check_id = 0
         self._last_geozone_features: list[dict] = []
@@ -599,33 +613,78 @@ class MainWindow(QMainWindow):
 
         basic_group = QGroupBox("Routenparameter")
         basic_form = QFormLayout(basic_group)
+        self.basic_form = basic_form
         self.altitude = self._number(60, 10, 500, 1, " m")
         self.speed = self._number(5, 1, 15, 0.5, " m/s")
+        self.curve_speed = self._number(3, 0.5, 15, 0.5, " m/s")
+        self.curve_speed.setToolTip("Wird nur für enge Kurven bei Stützpunkten und Overshooting verwendet.")
         self.path_spacing = self._number(20, 1, 250, 1, " m")
         self.direction = self._number(0, 0, 359.9, 5, " °")
         self.direction_mode = QComboBox()
         self.direction_mode.addItems([
             "West → Ost (0°)", "Ost → West (180°)", "Süd → Nord (90°)",
             "Nord → Süd (270°)", "Eigene Gradzahl", "Optimal (längste Kante)",
+            "Optimal (längste Kante, umgekehrt)",
             "Optimal (kürzeste Flugzeit)",
         ])
         self.direction_mode.currentTextChanged.connect(self._direction_mode_changed)
         self.route_mode = QComboBox()
-        self.route_mode.addItems([
-            "Standard (glatte Kurven)",
-            "WPML gerade / Punktstopp (nicht garantiert)",
-            "Stützpunkte für geradere Bahnen",
-        ])
         self.route_mode.currentTextChanged.connect(self._route_mode_changed)
-        self.support_spacing = self._number(10, 2, 100, 1, " m")
+        self.support_spacing = self._number(2, 0.5, 100, 0.5, " m")
+        self.support_spacing.setToolTip(
+            "Abstand der zwei Stützpunkte vor und nach jedem Umkehrpunkt. "
+            "Gerade Bahnen erhalten keine zusätzlichen Punkte."
+        )
         self.support_spacing.setEnabled(False)
+        self.overshoot_distance = self._number(5, 1, 100, 1, " m")
+        self.overshoot_distance.setEnabled(False)
+        self.overshoot_distance.setToolTip(
+            "Maximale Erweiterung außerhalb des Flugbereichs je U-Turn. "
+            "Es werden nur zwei zusätzliche Außenwegpunkte erzeugt."
+        )
+        self.overshoot_options = QWidget()
+        overshoot_options_layout = QHBoxLayout(self.overshoot_options)
+        overshoot_options_layout.setContentsMargins(0, 0, 0, 0)
+        self.reduced_overshoot_button = QPushButton("Sparmodus")
+        self.reduced_overshoot_button.setCheckable(True)
+        self.reduced_overshoot_button.setToolTip("Ersetzt die zwei Außenwegpunkte jeder Umkehr durch einen einzelnen Außenwegpunkt.")
+        self.reduced_overshoot_button.toggled.connect(self._overshoot_options_changed)
+        overshoot_options_layout.addWidget(self.reduced_overshoot_button)
+        overshoot_options_layout.addStretch(1)
+        self.support_options = QWidget()
+        support_options_layout = QHBoxLayout(self.support_options)
+        support_options_layout.setContentsMargins(0, 0, 0, 0)
+        self.reduced_support_button = QPushButton("Sparmodus")
+        self.reduced_support_button.setCheckable(True)
+        self.reduced_support_button.setToolTip("Fasst die zwei mittleren Stützpunkte jeder Umkehr zu einem Punkt zusammen.")
+        self.reduced_support_button.toggled.connect(self._support_options_changed)
+        self.keep_support_inside_button = QPushButton("Nur im Flugbereich erlauben")
+        self.keep_support_inside_button.setCheckable(True)
+        self.keep_support_inside_button.setToolTip("Plant mit einem Sicherheitsabstand nach innen. Das ist eine Näherung, keine Controller-Garantie.")
+        self.keep_support_inside_button.toggled.connect(self._support_options_changed)
+        support_options_layout.addWidget(self.reduced_support_button)
+        support_options_layout.addWidget(self.keep_support_inside_button)
+        self.flight_path_preview = QCheckBox("Geschätzte DJI-Flugbahn anzeigen (Centripetal-Catmull-Rom; Näherung)")
+        self.flight_path_preview.setChecked(True)
+        self.flight_path_preview.setToolTip(
+            "Nur Karten-Vorschau: Die exportierten Wegpunkte bleiben linear. "
+            "Die Flugsteuerung kann in der Praxis abweichen."
+        )
+        self.flight_path_preview.toggled.connect(lambda _checked: self._refresh_mission_display())
+        self._configure_route_modes()
         basic_form.addRow("Flughöhe:", self.altitude)
         basic_form.addRow("Geschwindigkeit:", self.speed)
+        basic_form.addRow("Kurvengeschwindigkeit:", self.curve_speed)
         basic_form.addRow("Bahnabstand:", self.path_spacing)
         basic_form.addRow("Richtungsvorgabe:", self.direction_mode)
         basic_form.addRow("Bahnrichtung:", self.direction)
         basic_form.addRow("Routenmodus:", self.route_mode)
-        basic_form.addRow("Stützpunkt-Abstand:", self.support_spacing)
+        basic_form.addRow("Stützpunkt-Abstand an Umkehrpunkten:", self.support_spacing)
+        basic_form.addRow("Überflug außerhalb des Flugbereichs:", self.overshoot_distance)
+        basic_form.addRow(self.overshoot_options)
+        basic_form.addRow(self.support_options)
+        basic_form.addRow(self.flight_path_preview)
+        self._route_mode_changed(self.route_mode.currentText())
         self._direction_mode_changed(self.direction_mode.currentText())
         flight_layout.addWidget(basic_group)
         photo_group = QGroupBox("Kamera & Photogrammetrie")
@@ -667,7 +726,7 @@ class MainWindow(QMainWindow):
         limit_form.addRow("Bei Flugende:", self.finish_action)
         limit_form.addRow("Bei Signalverlust:", self.signal_loss_action)
         self.outside_area_mode = QComboBox()
-        self.outside_area_mode.addItems(["Außerhalb erlaubt", "Dauerhaft im Flugbereich bleiben"])
+        self.outside_area_mode.addItems(["Außerhalb erlaubt", "Im Flugbereich bleiben (exkl. Overshooting)"])
         self.no_fly_mode = QComboBox()
         self.no_fly_mode.addItems(["Sperrgebiet umfliegen", "Sperrgebiet durchfliegen"])
         limit_form.addRow("Außerhalb des Flugbereichs:", self.outside_area_mode)
@@ -689,9 +748,15 @@ class MainWindow(QMainWindow):
         self.force_one_button.clicked.connect(self.force_one_mission)
         self.force_one_button.setVisible(False)
         flight_layout.addWidget(self.force_one_button)
+        self.toggle_route_button = QPushButton("Route verstecken")
+        self.toggle_route_button.setCheckable(True)
+        self.toggle_route_button.toggled.connect(self._toggle_route_visibility)
         clear_route = QPushButton("Routenanzeige löschen")
         clear_route.clicked.connect(lambda: self.js("clearMission()"))
-        flight_layout.addWidget(clear_route)
+        route_controls = QHBoxLayout()
+        route_controls.addWidget(self.toggle_route_button)
+        route_controls.addWidget(clear_route)
+        flight_layout.addLayout(route_controls)
         flight_layout.addStretch(1)
         tabs.addTab(flight, "Flugeinstellungen")
 
@@ -760,9 +825,10 @@ class MainWindow(QMainWindow):
             self.direction.setEnabled(True)
             return
         self.direction.setEnabled(False)
-        if selection == "Optimal (längste Kante)":
+        if selection in {"Optimal (längste Kante)", "Optimal (längste Kante, umgekehrt)"}:
             if len(self.points) >= 2:
-                self.direction.setValue(optimal_direction_deg(self.points))
+                angle = optimal_direction_deg(self.points)
+                self.direction.setValue((angle + 180) % 360 if selection.endswith("umgekehrt)") else angle)
             return
         if selection == "Optimal (kürzeste Flugzeit)":
             self.statusBar().showMessage("Optimale Flugzeit wird beim Generieren der Route berechnet.", 3000)
@@ -770,14 +836,88 @@ class MainWindow(QMainWindow):
         self.direction.setValue(fixed_angles[selection])
 
     def _route_mode_changed(self, selection: str):
-        self.support_spacing.setEnabled(self._canonical(selection) == "Stützpunkte für geradere Bahnen")
+        mode = self._canonical(selection)
+        support_mode = mode == "Stützpunkte für geradere Bahnen"
+        overshoot_mode = mode == "Overshooting"
+        self.curve_speed.setEnabled(support_mode or overshoot_mode)
+        self.support_spacing.setEnabled(support_mode)
+        self.overshoot_distance.setEnabled(overshoot_mode)
+        if hasattr(self, "support_options"):
+            self._set_route_option_visible(self.support_spacing, support_mode)
+            self._set_route_option_visible(self.support_options, support_mode)
+            self._set_route_option_visible(self.overshoot_distance, overshoot_mode)
+            self._set_route_option_visible(self.overshoot_options, overshoot_mode)
+        if mode == "Standard (DJI-Näherung: glatte Kurven)" and not self.flight_path_preview.isChecked():
+            self.flight_path_preview.setChecked(True)
+        if hasattr(self, "generated_missions"):
+            self._refresh_mission_display()
+
+    def _set_route_option_visible(self, field, visible: bool):
+        field.setVisible(visible)
+        label = self.basic_form.labelForField(field)
+        if label is not None:
+            label.setVisible(visible)
+
+    def _support_options_changed(self, *_args):
+        self.reduced_support_points = self.reduced_support_button.isChecked()
+        self.keep_support_route_inside = self.keep_support_inside_button.isChecked()
+        self._save_last_flight_settings()
+
+    def _overshoot_options_changed(self, *_args):
+        self.reduced_overshoot_points = self.reduced_overshoot_button.isChecked()
+        self._save_last_flight_settings()
+
+    def _configure_route_modes(self):
+        """Expose point-stop WPML only for the drone categories that support it."""
+        previous = self._canonical(self.route_mode.currentText())
+        if previous == "Lineare Wegpunkte (derzeit; mit Overshoot)":
+            previous = "Overshooting"
+        modes = [
+            "Standard (DJI-Näherung: glatte Kurven)",
+            "Stützpunkte für geradere Bahnen",
+            "Overshooting",
+        ]
+        if str(self.settings.value("drone_category", "consumer")) == "prosumer_enterprise":
+            modes.insert(1, "WPML gerade / Punktstopp (nicht garantiert)")
+        self.route_mode.blockSignals(True)
+        self.route_mode.clear()
+        self.route_mode.addItems(modes)
+        self.route_mode.setCurrentText(previous if previous in modes else modes[0])
+        self.route_mode.blockSignals(False)
+        self._route_mode_changed(self.route_mode.currentText())
+
+    def _set_saved_route_mode(self, value):
+        mode = self._canonical(str(value))
+        if mode == "Lineare Wegpunkte (derzeit; mit Overshoot)":
+            mode = "Overshooting"
+        for index in range(self.route_mode.count()):
+            if self._canonical(self.route_mode.itemText(index)) == mode:
+                self.route_mode.setCurrentIndex(index)
+                return
+
+    def _set_saved_outside_area_mode(self, value):
+        mode = self._canonical(str(value))
+        if mode in {"Dauerhaft im Flugbereich bleiben", "Im Flugbereich bleiben (exkl. Overshooting)"}:
+            self.outside_area_mode.setCurrentIndex(1)
+        elif mode in [self._canonical(self.outside_area_mode.itemText(index)) for index in range(self.outside_area_mode.count())]:
+            self.outside_area_mode.setCurrentText(str(value))
+
+    def _refresh_mission_display(self):
+        if self.generated_missions:
+            self._show_missions(self.generated_missions)
+
+    def _toggle_route_visibility(self, hidden: bool):
+        self.js(f"setMissionVisible({str(not hidden).lower()})")
+        self.toggle_route_button.setText("Route zeigen" if hidden else "Route verstecken")
 
     def _preset_values(self) -> dict:
         return {
-            "altitude": self.altitude.value(), "speed": self.speed.value(),
+            "altitude": self.altitude.value(), "speed": self.speed.value(), "curve_speed": self.curve_speed.value(),
             "path_spacing": self.path_spacing.value(), "direction": self.direction.value(),
             "direction_mode": self.direction_mode.currentText(),
-            "route_mode": self.route_mode.currentText(), "support_spacing": self.support_spacing.value(),
+            "route_mode": self.route_mode.currentText(), "support_spacing": self.support_spacing.value(), "overshoot_distance": self.overshoot_distance.value(),
+            "reduced_support_points": self.reduced_support_points, "keep_support_route_inside": self.keep_support_route_inside,
+            "reduced_overshoot_points": self.reduced_overshoot_points,
             "side_overlap": self.side_overlap.value(), "forward_overlap": self.forward_overlap.value(),
             "photo_distance": self.photo_distance.value(), "gimbal_pitch": self.gimbal_pitch.value(),
             "waypoint_action": self.waypoint_action.currentText(),
@@ -821,8 +961,12 @@ class MainWindow(QMainWindow):
                 (self.support_spacing, "support_spacing"),
             ]:
                 field.setValue(float(values[key]))
+            if "curve_speed" in values:
+                self.curve_speed.setValue(float(values["curve_speed"]))
+            if "overshoot_distance" in values:
+                self.overshoot_distance.setValue(float(values["overshoot_distance"]))
             self.direction_mode.setCurrentText(values["direction_mode"])
-            self.route_mode.setCurrentText(values["route_mode"])
+            self._set_saved_route_mode(values["route_mode"])
             if self._canonical(values["direction_mode"]) == "Eigene Gradzahl":
                 self.direction.setValue(float(values["direction"]))
             else:
@@ -831,8 +975,11 @@ class MainWindow(QMainWindow):
             self.split_mode.setCurrentText(values["split_mode"])
             self.finish_action.setCurrentText(values.get("finish_action", self.finish_action.currentText()))
             self.signal_loss_action.setCurrentText(values.get("signal_loss_action", self.signal_loss_action.currentText()))
-            self.outside_area_mode.setCurrentText(values.get("outside_area_mode", self.outside_area_mode.currentText()))
+            self._set_saved_outside_area_mode(values.get("outside_area_mode", self.outside_area_mode.currentText()))
             self.no_fly_mode.setCurrentText(values.get("no_fly_mode", self.no_fly_mode.currentText()))
+            self.reduced_support_button.setChecked(bool(values.get("reduced_support_points", False)))
+            self.keep_support_inside_button.setChecked(bool(values.get("keep_support_route_inside", False)))
+            self.reduced_overshoot_button.setChecked(bool(values.get("reduced_overshoot_points", False)))
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             QMessageBox.warning(self, "Preset fehlerhaft", f"Das Preset konnte nicht geladen werden:\n{error}")
             return
@@ -852,13 +999,44 @@ class MainWindow(QMainWindow):
         self._apply_language()
 
     def open_settings_dialog(self):
-        """Zentrale, nicht verstreute Einstellungen für Oberfläche und UAS-Geozonen."""
+        """Zentrale Einstellungen für Profil, Oberfläche und UAS-Geozonen."""
         english = self.ui_language == "en"
         dialog = QDialog(self)
         dialog.setWindowTitle("Settings" if english else "Einstellungen")
         dialog.setMinimumWidth(440)
         layout = QVBoxLayout(dialog)
 
+        settings_tabs = QTabWidget(dialog)
+        layout.addWidget(settings_tabs)
+
+        general = QWidget(settings_tabs)
+        general_form = QFormLayout(general)
+        drone_category = QComboBox(general)
+        drone_category.addItem(
+            "Consumer (e.g. DJI Mini 5 Pro, Lito)" if english else
+            "Consumer (z. B. DJI Mini 5 Pro, Lito)",
+            "consumer",
+        )
+        drone_category.addItem(
+            "Prosumer / Enterprise (e.g. Matrice, RTK models)" if english else
+            "Prosumer / Enterprise (z. B. Matrice, RTK-Modelle)",
+            "prosumer_enterprise",
+        )
+        saved_category = str(self.settings.value("drone_category", "consumer"))
+        drone_category.setCurrentIndex(1 if saved_category == "prosumer_enterprise" else 0)
+        general_form.addRow("Drone category" if english else "Drohnenart", drone_category)
+        general_note = QLabel(
+            "This selection is saved as your drone profile and will be used for category-specific settings."
+            if english else
+            "Die Auswahl wird als Drohnenprofil gespeichert und dient künftig als Grundlage für kategorieabhängige Einstellungen."
+        )
+        general_note.setWordWrap(True)
+        general_note.setStyleSheet("color:#596780;")
+        general_form.addRow(general_note)
+        settings_tabs.addTab(general, "General" if english else "Allgemein")
+
+        geozone_tab = QWidget(settings_tabs)
+        geozone_layout = QVBoxLayout(geozone_tab)
         language_row = QHBoxLayout()
         language_row.addWidget(QLabel("Language" if english else "Sprache"))
         language = QComboBox(dialog)
@@ -866,9 +1044,9 @@ class MainWindow(QMainWindow):
         language.addItem("English", "en")
         language.setCurrentIndex(1 if self.ui_language == "en" else 0)
         language_row.addWidget(language, 1)
-        layout.addLayout(language_row)
+        geozone_layout.addLayout(language_row)
 
-        geozones = QGroupBox("UAS geozones" if english else "UAS-Geozonen", dialog)
+        geozones = QGroupBox("UAS geozones" if english else "UAS-Geozonen", geozone_tab)
         geozone_form = QFormLayout(geozones)
         opacity = QSpinBox(geozones)
         opacity.setRange(10, 100)
@@ -885,7 +1063,7 @@ class MainWindow(QMainWindow):
         zone_method.addItem("Fine – clipped intersection areas" if english else "Fein – zugeschnittene Schnittflächen", "fine")
         zone_method.setCurrentIndex(1 if self.geozone_zone_method == "fine" else 0)
         geozone_form.addRow("No-fly zone method" if english else "Sperrgebiets-Methode", zone_method)
-        layout.addWidget(geozones)
+        geozone_layout.addWidget(geozones)
 
         note = (
             "Fine mode splits large official areas into their actual intersections with the flight area. "
@@ -894,19 +1072,25 @@ class MainWindow(QMainWindow):
             "Der Feinmodus schneidet große offizielle Flächen auf ihre tatsächlichen Schnittflächen mit dem Flugbereich zu. "
             "Die Einstellung gilt für die nächste Geozonen-Prüfung."
         )
-        layout.addWidget(QLabel(note))
+        note_label = QLabel(note)
+        note_label.setWordWrap(True)
+        geozone_layout.addWidget(note_label)
+        geozone_layout.addStretch(1)
+        settings_tabs.addTab(geozone_tab, "UAS geozones" if english else "UAS-Geozonen")
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=dialog)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        self.settings.setValue("drone_category", drone_category.currentData())
         self.settings.setValue("geozone_opacity", opacity.value())
         self.settings.setValue("local_rules_opacity", local_opacity.value())
         self.settings.setValue("geozone_zone_method", zone_method.currentData())
         self.settings.setValue("ui_language", language.currentData())
         self.settings.sync()
         self.geozone_zone_method = zone_method.currentData()
+        self._configure_route_modes()
         self.js(f"setGeozoneOpacity({opacity.value()})")
         self.js(f"setLocalRulesOpacity({local_opacity.value()})")
         if self.ui_language != language.currentData():
@@ -1008,8 +1192,8 @@ class MainWindow(QMainWindow):
         if not isinstance(values, dict):
             raise ValueError("Die Flugeinstellungen sind ungültig.")
         number_fields = [
-            (self.altitude, "altitude"), (self.speed, "speed"), (self.path_spacing, "path_spacing"),
-            (self.direction, "direction"), (self.support_spacing, "support_spacing"),
+            (self.altitude, "altitude"), (self.speed, "speed"), (self.curve_speed, "curve_speed"), (self.path_spacing, "path_spacing"),
+            (self.direction, "direction"), (self.support_spacing, "support_spacing"), (self.overshoot_distance, "overshoot_distance"),
             (self.side_overlap, "side_overlap"), (self.forward_overlap, "forward_overlap"),
             (self.photo_distance, "photo_distance"), (self.gimbal_pitch, "gimbal_pitch"),
             (self.max_waypoints, "max_waypoints"), (self.max_flight_minutes, "max_flight_minutes"),
@@ -1025,6 +1209,11 @@ class MainWindow(QMainWindow):
         for field, key in combo_fields:
             if key in values and values[key] in [field.itemText(i) for i in range(field.count())]:
                 field.setCurrentText(values[key])
+        if "outside_area_mode" in values:
+            self._set_saved_outside_area_mode(values["outside_area_mode"])
+        self.reduced_support_button.setChecked(bool(values.get("reduced_support_points", False)))
+        self.keep_support_inside_button.setChecked(bool(values.get("keep_support_route_inside", False)))
+        self.reduced_overshoot_button.setChecked(bool(values.get("reduced_overshoot_points", False)))
         self._direction_mode_changed(self.direction_mode.currentText())
         self._route_mode_changed(self.route_mode.currentText())
 
@@ -1524,8 +1713,8 @@ class MainWindow(QMainWindow):
             if not isinstance(values, dict):
                 return
             number_fields = [
-                (self.altitude, "altitude"), (self.speed, "speed"), (self.path_spacing, "path_spacing"),
-                (self.direction, "direction"), (self.support_spacing, "support_spacing"),
+                (self.altitude, "altitude"), (self.speed, "speed"), (self.curve_speed, "curve_speed"), (self.path_spacing, "path_spacing"),
+                (self.direction, "direction"), (self.support_spacing, "support_spacing"), (self.overshoot_distance, "overshoot_distance"),
                 (self.side_overlap, "side_overlap"), (self.forward_overlap, "forward_overlap"),
                 (self.photo_distance, "photo_distance"), (self.gimbal_pitch, "gimbal_pitch"),
                 (self.max_waypoints, "max_waypoints"), (self.max_flight_minutes, "max_flight_minutes"),
@@ -1541,6 +1730,11 @@ class MainWindow(QMainWindow):
             ]:
                 if key in values and values[key] in [field.itemText(index) for index in range(field.count())]:
                     field.setCurrentText(values[key])
+            if "outside_area_mode" in values:
+                self._set_saved_outside_area_mode(values["outside_area_mode"])
+            self.reduced_support_button.setChecked(bool(values.get("reduced_support_points", False)))
+            self.keep_support_inside_button.setChecked(bool(values.get("keep_support_route_inside", False)))
+            self.reduced_overshoot_button.setChecked(bool(values.get("reduced_overshoot_points", False)))
             self._direction_mode_changed(self.direction_mode.currentText())
             self._route_mode_changed(self.route_mode.currentText())
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -1548,7 +1742,7 @@ class MainWindow(QMainWindow):
 
     def _connect_flight_settings_autosave(self):
         number_fields = [
-            self.altitude, self.speed, self.path_spacing, self.direction, self.support_spacing,
+            self.altitude, self.speed, self.curve_speed, self.path_spacing, self.direction, self.support_spacing, self.overshoot_distance,
             self.side_overlap, self.forward_overlap, self.photo_distance, self.gimbal_pitch,
             self.max_waypoints, self.max_flight_minutes,
         ]
@@ -1680,8 +1874,8 @@ class MainWindow(QMainWindow):
         self._geozone_review_decisions = {}
         if hasattr(self, "geozone_review_button"):
             self.geozone_review_button.setEnabled(False)
-        if self._canonical(self.direction_mode.currentText()) == "Optimal (längste Kante)":
-            self._direction_mode_changed("Optimal (längste Kante)")
+        if self._canonical(self.direction_mode.currentText()) in {"Optimal (längste Kante)", "Optimal (längste Kante, umgekehrt)"}:
+            self._direction_mode_changed(self.direction_mode.currentText())
         self.generated_route = []
         self.generated_missions = []
         self.force_single_mission = False
@@ -1755,13 +1949,96 @@ class MainWindow(QMainWindow):
     def _coverage_route(self) -> list[list[float]]:
         # "Durchfliegen" lässt Sperrgebiete bewusst bei der Bahnberechnung aus.
         zones = [] if self.no_fly_mode.currentText() == "Sperrgebiet durchfliegen" else self.no_fly_zones
+        mode = self._canonical(self.route_mode.currentText())
+        use_overshoot = mode == "Overshooting"
+        self.overshoot_paths = []
+        planning_area = self._inset_support_area() if mode == "Stützpunkte für geradere Bahnen" and self.keep_support_route_inside else self.points
         route = generate_lawnmower_route(
-            self.points, self.path_spacing.value(), self._planning_direction(), zones,
-            self.outside_area_mode.currentText() == "Außerhalb erlaubt",
+            planning_area, self.path_spacing.value(), self._planning_direction(), zones,
+            use_overshoot or self.outside_area_mode.currentText() == "Außerhalb erlaubt",
         )
-        if self._canonical(self.route_mode.currentText()) == "Stützpunkte für geradere Bahnen":
-            route = densify_route(route, self.support_spacing.value())
+        if mode == "Stützpunkte für geradere Bahnen":
+            route = densify_route(route, self.support_spacing.value(), self.reduced_support_points)
+        elif use_overshoot:
+            route, self.overshoot_paths = add_overshoot_turns(
+                route, self.overshoot_distance.value(), self.reduced_overshoot_points
+            )
         return route
+
+    def _inset_support_area(self):
+        """Inset the planning area by one support distance for the safety option."""
+        latitude_origin = sum(point[0] for point in self.points) / len(self.points)
+        longitude_origin = sum(point[1] for point in self.points) / len(self.points)
+        latitude_scale = 111_132.92
+        longitude_scale = 111_319.49 * math.cos(math.radians(latitude_origin))
+        local = [((lon - longitude_origin) * longitude_scale, (lat - latitude_origin) * latitude_scale) for lat, lon in self.points]
+        inset = Polygon(local).buffer(-self.support_spacing.value())
+        if inset.is_empty:
+            self.statusBar().showMessage("Sicherheitsabstand zu groß: Es wird die ursprüngliche Flugfläche verwendet.", 5000)
+            return self.points
+        if inset.geom_type == "MultiPolygon":
+            inset = max(inset.geoms, key=lambda geometry: geometry.area)
+        if inset.geom_type != "Polygon" or len(inset.exterior.coords) < 4:
+            self.statusBar().showMessage("Flugfläche konnte nicht sicher verkleinert werden.", 5000)
+            return self.points
+        return [[latitude_origin + y / latitude_scale, longitude_origin + x / longitude_scale] for x, y in list(inset.exterior.coords)[:-1]]
+
+    def _waypoint_speeds(self, route):
+        """Assign the lower speed before, through and just after tight turns."""
+        normal_speed = self.speed.value()
+        speeds = [normal_speed] * len(route)
+        if self._canonical(self.route_mode.currentText()) not in {"Stützpunkte für geradere Bahnen", "Overshooting"}:
+            return speeds
+        curve_indices = set()
+        latitude_scale = 111_132.92
+        for index in range(1, len(route) - 1):
+            previous, point, following = route[index - 1:index + 2]
+            longitude_scale = 111_319.49 * math.cos(math.radians(point[0]))
+            incoming = ((point[0] - previous[0]) * latitude_scale, (point[1] - previous[1]) * longitude_scale)
+            outgoing = ((following[0] - point[0]) * latitude_scale, (following[1] - point[1]) * longitude_scale)
+            incoming_length, outgoing_length = math.hypot(*incoming), math.hypot(*outgoing)
+            if not incoming_length or not outgoing_length:
+                continue
+            cosine = (incoming[0] * outgoing[0] + incoming[1] * outgoing[1]) / (incoming_length * outgoing_length)
+            if cosine < math.cos(math.radians(12)):
+                curve_indices.update(range(max(0, index - 1), min(len(route), index + 2)))
+        for index in curve_indices:
+            speeds[index] = min(normal_speed, self.curve_speed.value())
+        return speeds
+
+    def _overshoot_zone_feature(self):
+        """Build the visible exterior flight-zone allowance around overshoot paths."""
+        if not self.overshoot_paths or len(self.points) < 3:
+            return None
+        all_points = self.points + [point for path in self.overshoot_paths for point in path]
+        latitude_origin = sum(point[0] for point in all_points) / len(all_points)
+        longitude_origin = sum(point[1] for point in all_points) / len(all_points)
+        latitude_scale = 111_132.92
+        longitude_scale = 111_319.49 * math.cos(math.radians(latitude_origin))
+
+        def local(point):
+            return ((point[1] - longitude_origin) * longitude_scale, (point[0] - latitude_origin) * latitude_scale)
+
+        corridor = unary_union([LineString([local(point) for point in path]) for path in self.overshoot_paths])
+        # The cyan zone is deliberately 2 m wider than the planned exterior
+        # path, but clipped so the original user-drawn flight area stays clear.
+        exterior = corridor.buffer(self.overshoot_distance.value() + 2.0).difference(Polygon([local(point) for point in self.points]))
+        if exterior.is_empty:
+            return None
+
+        def ring(coordinates):
+            return [[longitude_origin + x / longitude_scale, latitude_origin + y / latitude_scale] for x, y in coordinates]
+
+        def polygon_coordinates(polygon):
+            return [ring(polygon.exterior.coords)] + [ring(interior.coords) for interior in polygon.interiors]
+
+        if exterior.geom_type == "Polygon":
+            geometry = {"type": "Polygon", "coordinates": polygon_coordinates(exterior)}
+        elif exterior.geom_type == "MultiPolygon":
+            geometry = {"type": "MultiPolygon", "coordinates": [polygon_coordinates(polygon) for polygon in exterior.geoms]}
+        else:
+            return None
+        return {"type": "Feature", "properties": {"kind": "overshoot_zone"}, "geometry": geometry}
 
     def _show_missions(self, missions):
         labels=[]
@@ -1769,7 +2046,15 @@ class MainWindow(QMainWindow):
             seconds=estimated_route_seconds(mission, self.speed.value(), self._turn_delay_seconds())
             minutes, remainder=divmod(round(seconds),60)
             labels.append(f"Mission {index} · {len(mission)} WP · ≈ {minutes}:{remainder:02d} min")
-        self.js(f"showMissions({json.dumps(missions)}, {json.dumps(labels)});")
+        estimated_paths = (
+            [centripetal_catmull_rom_route(mission) for mission in missions]
+            if self.flight_path_preview.isChecked() else []
+        )
+        self.js(
+            f"showMissions({json.dumps(missions)}, {json.dumps(labels)}, "
+            f"{json.dumps(estimated_paths)}, {json.dumps(self.overshoot_paths)}, "
+            f"{json.dumps(self._overshoot_zone_feature())});"
+        )
 
 
     def _turn_delay_seconds(self) -> float:
@@ -1891,6 +2176,7 @@ class MainWindow(QMainWindow):
             destination, route, self.altitude.value(), self.speed.value(), self.gimbal_pitch.value(),
             self.waypoint_action.currentText(), self.photo_distance.value(), self.route_mode.currentText(),
             finish_actions[self._canonical(self.finish_action.currentText())], signal_loss_actions[self._canonical(self.signal_loss_action.currentText())],
+            self._waypoint_speeds(route),
         )
         return True
 
@@ -1984,7 +2270,10 @@ class MainWindow(QMainWindow):
         return inside
 
     def _export_validation_errors(self, missions):
-        errors=[]; enforce_area=self.outside_area_mode.currentText()=="Dauerhaft im Flugbereich bleiben"
+        errors=[]; enforce_area=(
+            self._canonical(self.outside_area_mode.currentText()).startswith("Im Flugbereich bleiben")
+            and self._canonical(self.route_mode.currentText()) != "Overshooting"
+        )
         enforce_zones=self.no_fly_mode.currentText()=="Sperrgebiet umfliegen"
         for mission_number, mission in enumerate(missions, 1):
             for point_number, point in enumerate(mission, 1):
