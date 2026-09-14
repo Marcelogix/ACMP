@@ -133,7 +133,7 @@ const map = L.map('map', {zoomControl:true, layers:[normal]}).setView([51.1657, 
 L.control.layers({'Karte':normal, 'Satellit':satellite}, null, {position:'topleft'}).addTo(map);
 L.control.scale({position:'bottomleft', metric:true, imperial:false, maxWidth:140}).addTo(map);
 let points = [], polygon = null, preview = null, shapePreview = null, shapeStart = null, markers = [], drawMode = 'none';
-let noFlyZones = [], activeNoFly = [], noFlyLayer = L.layerGroup().addTo(map);
+let noFlyZones = [], activeNoFly = [], selectedNoFly = -1, noFlyLayer = L.layerGroup().addTo(map);
 let missionLayer = L.layerGroup().addTo(map);
 let geozoneConflictLayer = L.layerGroup().addTo(map);
 function emit(){ console.log('ACMP_POLYGON:' + JSON.stringify(points)); }
@@ -151,7 +151,13 @@ function redraw(silent=false){
 }
 function redrawNoFly(){
   noFlyLayer.clearLayers();
-  noFlyZones.forEach((zone,index)=>L.polygon(zone,{color:'#c92525',weight:3,fillColor:'#e53935',fillOpacity:.28}).bindTooltip(`Sperrgebiet ${index+1}`,{sticky:true}).addTo(noFlyLayer));
+  noFlyZones.forEach((zone,index)=>{
+    const selected=index===selectedNoFly;
+    L.polygon(zone, selected
+      ? {color:'#ff8c00',weight:5,fillColor:'#ffb000',fillOpacity:.42,dashArray:'9 5'}
+      : {color:'#c92525',weight:3,fillColor:'#e53935',fillOpacity:.28}
+    ).bindTooltip(`Sperrgebiet ${index+1}`,{sticky:true}).addTo(noFlyLayer);
+  });
   if(activeNoFly.length >= 3) L.polygon(activeNoFly,{color:'#c92525',weight:3,dashArray:'7 6',fillColor:'#e53935',fillOpacity:.18}).addTo(noFlyLayer);
   else if(activeNoFly.length) L.polyline(activeNoFly,{color:'#c92525',weight:3,dashArray:'7 6'}).addTo(noFlyLayer);
 }
@@ -205,12 +211,13 @@ function setInspect(value){ drawMode=value?'inspect':'none'; map.getContainer().
 function finishNoFly(){ if(activeNoFly.length >= 3){noFlyZones.push(activeNoFly);emitNoFly();} activeNoFly=[];redrawNoFly(); }
 function cancelNoFly(){ activeNoFly=[];redrawNoFly(); }
 function deleteNoFly(index){ if(index>=0 && index<noFlyZones.length){noFlyZones.splice(index,1);redrawNoFly();emitNoFly();} }
+function selectNoFly(index){ selectedNoFly=index; redrawNoFly(); }
 function clearNoFly(){ noFlyZones=[];activeNoFly=[];redrawNoFly();emitNoFly(); }
 function clearAll(){ points=[]; noFlyZones=[]; activeNoFly=[]; redraw(); redrawNoFly(); emitNoFly(); }
 function setProjectGeometry(newPoints,newZones){
   points=Array.isArray(newPoints)?newPoints:[];
   noFlyZones=Array.isArray(newZones)?newZones:[];
-  activeNoFly=[]; redraw(true); redrawNoFly();
+  activeNoFly=[]; selectedNoFly=-1; redraw(true); redrawNoFly();
 }
 function undo(){ if(points.length){points.pop();redraw();} }
 function clearPolygon(){ points=[]; redraw(); }
@@ -474,6 +481,7 @@ class MainWindow(QMainWindow):
         capture_layout.addWidget(cancel_no_fly)
         self.zone_list = QListWidget()
         self.zone_list.setMinimumHeight(95)
+        self.zone_list.currentRowChanged.connect(lambda row: self.js(f"selectNoFly({row})"))
         self.zone_list.itemDoubleClicked.connect(self.rename_no_fly_zone)
         capture_layout.addWidget(self.zone_list)
         delete_zone = QPushButton("Ausgewähltes Sperrgebiet löschen")
