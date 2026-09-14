@@ -52,27 +52,30 @@ from PySide6.QtWidgets import (
 )
 
 UI_EN = {
-    "Datei": "File", "Einstellungen": "Settings", "Öffnen …": "Open …", "Speichern unter …": "Save as …",
+    "Datei": "File", "Einstellungen": "Settings", "Neu": "New", "Öffnen …": "Open …", "Speichern": "Save", "Speichern unter …": "Save as …",
     "Preset speichern": "Save preset", "Preset laden": "Load preset", "Sprache …": "Language …", "Info": "Info",
     "Gebiet auswählen": "Select area", "Adresse oder Ort suchen": "Search address or place",
     "Mein Standort": "My location", "Suchen": "Search", "Kartenansicht": "Map view",
-    "Karte": "Map", "Rechteck": "Rectangle", "Kreis": "Circle", "Letzten Punkt rückgängig": "Undo last point",
+    "Karte": "Map", "Satellit": "Satellite", "Polygon": "Polygon", "Rechteck": "Rectangle", "Kreis": "Circle", "Letzten Punkt rückgängig": "Undo last point",
     "Alles löschen": "Clear all", "Sperrgebiete": "No-fly zones", "Sperrgebiet zeichnen": "Draw no-fly zone",
     "Aktuelles Sperrgebiet verwerfen": "Discard current no-fly zone", "Ausgewähltes Sperrgebiet löschen": "Delete selected no-fly zone",
     "Fläche: —": "Area: —", "Koordinaten der aktiven Zone (Lat, Lon)": "Active-area coordinates (Lat, Lon)",
-    "Koordinaten kopieren": "Copy coordinates", "Karte & Gebiet": "Map & area", "Flugeinstellungen": "Flight settings",
+    "Koordinaten kopieren": "Copy coordinates", "Fluggebiet planen": "Plan flight area", "Flugeinstellungen": "Flight settings",
     "Flughöhe:": "Altitude:", "Geschwindigkeit:": "Speed:", "Bahnabstand:": "Path spacing:",
     "Richtungsvorgabe:": "Direction mode:", "Bahnrichtung:": "Path direction:", "Routenmodus:": "Route mode:",
     "Stützpunkt-Abstand:": "Support-point spacing:", "Kamera & Photogrammetrie": "Camera & photogrammetry",
     "Seitliche Überlappung:": "Side overlap:", "Vorwärtsüberlappung:": "Forward overlap:", "Foto alle (Distanz):": "Photo every (distance):",
     "Kamera-Neigung:": "Gimbal pitch:", "Aktion:": "Action:", "Missionsgrenze": "Mission limits",
-    "Max. Wegpunkte:": "Max. waypoints:", "Max. Flugzeit / Mission:": "Max. flight time / mission:", "Aufteilung:": "Splitting:",
+    "Max. Wegpunkte:": "Max. waypoints:", "Max. Flugzeit / Mission:": "Max. flight time / mission:", "Aufteilung auf Missionen:": "Split across missions:",
     "Bei Flugende:": "At flight end:", "Bei Signalverlust:": "On signal loss:",
+    "Außerhalb des Flugbereichs:": "Outside flight area:", "Bei Sperrgebieten:": "For no-fly zones:",
     "Route generieren und auf Karte zeigen": "Generate route and show on map",
     "Eine Mission erzwingen (Grenzen überschreiten)": "Force one mission (exceed limits)", "Routenanzeige löschen": "Clear route display",
     "Exportieren & Speichern": "Export & save", "KMZ-Datei speichern": "Save KMZ file", "KMZ-Dateiname / Missionsname": "KMZ filename / mission name",
     "KMZ-Datei speichern …": "Save KMZ file …", "Vorschaubild speichern …": "Save preview image …", "Text im Vorschaubild": "Preview-image text",
     "Vorschaubild mit Name speichern …": "Save preview image with name …", "Exportieren": "Export",
+    "Erzeugt ein DJI-WPML-KMZ mit <code>template.kml</code> und <code>waylines.wpml</code>.": "Creates a DJI WPML KMZ with <code>template.kml</code> and <code>waylines.wpml</code>.",
+    "Missionsname": "Mission name",
     "West → Ost (0°)": "West → East (0°)", "Ost → West (180°)": "East → West (180°)",
     "Süd → Nord (90°)": "South → North (90°)", "Nord → Süd (270°)": "North → South (270°)",
     "Eigene Gradzahl": "Custom angle", "Optimal (längste Kante)": "Optimal (longest edge)", "Optimal (kürzeste Flugzeit)": "Optimal (shortest flight time)",
@@ -81,9 +84,24 @@ UI_EN = {
     "Foto nach Distanzintervall": "Photo at distance interval", "Keine Aktion": "No action", "2 s schweben": "Hover 2 s", "Was ist hier?": "What's here?",
     "Konflikte …": "Conflicts …",
     "UAS-Geozonen": "UAS geozones", "UAS-Geozonen (Deutschland)": "UAS geozones (Germany)",
+    "Lokale Bestimmungen": "Local rules", "Lokale Bestimmungen (Deutschland)": "Local rules (Germany)",
+    "Flugbereich": "Flight area", "Auf Flugbereich zoomen": "Zoom to flight area",
+    "Routenparameter": "Route parameters",
+    "Außerhalb erlaubt": "Outside flight area allowed", "Dauerhaft im Flugbereich bleiben": "Remain inside flight area",
+    "Sperrgebiet umfliegen": "Avoid no-fly zones", "Sperrgebiet durchfliegen": "Allow flight through no-fly zones",
     "Maximal ausnutzen": "Use maximum", "Gleichmäßig verteilen": "Distribute evenly",
     "Rückkehr zum Startpunkt (Home)": "Return to home", "Schweben am letzten Wegpunkt": "Hover at last waypoint",
     "Landen am letzten Wegpunkt": "Land at last waypoint", "Zum ersten Wegpunkt": "Go to first waypoint", "Schweben": "Hover", "Landen": "Land",
+    "Noch keine Route generiert.": "No route generated yet.", "Punkte: 0": "Points: 0",
+    "Aktive Zone: noch nicht gezeichnet · Sperrgebiete: 0": "Active area: not drawn · no-fly zones: 0",
+    "Zeichne mindestens drei Punkte auf der Karte.": "Draw at least three points on the map.",
+    "Vorschaubilder – experimentell": "Preview images – experimental",
+    "Die Bilddateien werden erstellt, aber DJI Fly übernimmt externe Vorschaubilder möglicherweise nicht.": "Image files are created, but DJI Fly may not use external preview images.",
+    "Vorschauformat: JPEG, 400 × 300 Pixel": "Preview format: JPEG, 400 × 300 pixels",
+    "Offizieller dipul/DFS-Kartenlayer, nur zur Orientierung.": "Official dipul/DFS map layer, for orientation only.",
+    "Zuletzt erkannte Überschneidungen erneut prüfen und bearbeiten.": "Review and edit the most recently detected conflicts.",
+    "BfN-Schutzgebiete als Hinweis – keine pauschalen Flugverbote.": "BfN protected areas as hints – not blanket no-fly zones.",
+    "Hinweis zur rechtlichen Einordnung": "Legal-information notice",
 }
 UI_DE = {english: german for german, english in UI_EN.items()}
 
@@ -110,6 +128,12 @@ GEOZONE_LABELS = {
     "polizei": "Polizei", "temporaere_betriebseinschraenkungen": "Temporäre Betriebseinschränkungen",
     "vogelschutzgebiete": "Vogelschutzgebiete", "wohngrundstuecke": "Wohngrundstücke",
 }
+LOCAL_RULE_LAYERS = {
+    "Landschaftsschutzgebiete": "Landschaftsschutzgebiet",
+    "Naturparke": "Naturpark",
+    "Biosphaerenreservate": "Biosphärenreservat",
+    "Nationale_Naturmonumente": "Nationales Naturmonument",
+}
 
 
 def canonical_ui_text(value: str) -> str:
@@ -130,6 +154,13 @@ const geozones = L.tileLayer.wms('https://uas-betrieb.de/geoservices/dipul/wms?'
   format:'image/png',transparent:true,version:'1.3.0',opacity:.85,attribution:'© DFS/dipul'
 });
 const map = L.map('map', {zoomControl:true, layers:[normal]}).setView([51.1657, 10.4515], 6);
+map.createPane('localRulesPane');
+map.getPane('localRulesPane').style.zIndex=350;
+map.getPane('localRulesPane').style.filter='hue-rotate(35deg) saturate(.65)';
+const localRules = L.tileLayer.wms('https://geodienste.bfn.de/ogc/wms/schutzgebiet?', {
+  layers:'Landschaftsschutzgebiete,Naturparke,Biosphaerenreservate,Nationale_Naturmonumente',
+  format:'image/png',transparent:true,version:'1.3.0',opacity:.35,pane:'localRulesPane',attribution:'© BfN Schutzgebiete'
+});
 L.control.layers({'Karte':normal, 'Satellit':satellite}, null, {position:'topleft'}).addTo(map);
 L.control.scale({position:'bottomleft', metric:true, imperial:false, maxWidth:140}).addTo(map);
 let points = [], polygon = null, preview = null, shapePreview = null, shapeStart = null, markers = [], drawMode = 'none';
@@ -165,6 +196,7 @@ map.on('click', e=>{
   if(drawMode==='area'){ points.push([e.latlng.lat,e.latlng.lng]); redraw(); }
   if(drawMode==='nofly'){ activeNoFly.push([e.latlng.lat,e.latlng.lng]); redrawNoFly(); }
   if(drawMode==='inspect'){ drawMode='none'; map.getContainer().style.cursor=''; console.log('ACMP_INSPECT:' + JSON.stringify([e.latlng.lat,e.latlng.lng])); }
+  if(drawMode==='localinspect'){ drawMode='none'; map.getContainer().style.cursor=''; console.log('ACMP_LOCAL_INSPECT:' + JSON.stringify([e.latlng.lat,e.latlng.lng])); }
 });
 map.on('contextmenu', e=>{ L.DomEvent.preventDefault(e.originalEvent); });
 map.on('mousedown', e=>{
@@ -208,6 +240,7 @@ function setDrawing(value){ drawMode=value?'area':'none'; map.getContainer().sty
 function setShapeDrawing(kind){ drawMode=kind; map.getContainer().style.cursor='crosshair'; endPreview(); }
 function setNoFlyDrawing(value){ drawMode=value?'nofly':'none'; map.getContainer().style.cursor=value?'crosshair':''; endPreview(); if(!value) finishNoFly(); }
 function setInspect(value){ drawMode=value?'inspect':'none'; map.getContainer().style.cursor=value?'crosshair':''; endPreview(); }
+function setLocalInspect(value){ drawMode=value?'localinspect':'none'; map.getContainer().style.cursor=value?'crosshair':''; endPreview(); }
 function finishNoFly(){ if(activeNoFly.length >= 3){noFlyZones.push(activeNoFly);emitNoFly();} activeNoFly=[];redrawNoFly(); }
 function cancelNoFly(){ activeNoFly=[];redrawNoFly(); }
 function deleteNoFly(index){ if(index>=0 && index<noFlyZones.length){noFlyZones.splice(index,1);redrawNoFly();emitNoFly();} }
@@ -225,6 +258,8 @@ function zoomToArea(){ const layers=[]; if(points.length) layers.push(L.polygon(
 function setBase(name){ if(name==='satellite'){map.removeLayer(normal);satellite.addTo(map);}else{map.removeLayer(satellite);normal.addTo(map);} }
 function setGeozones(value){ if(value){geozones.addTo(map);}else{map.removeLayer(geozones);} }
 function setGeozoneOpacity(value){ geozones.setOpacity(value/100); }
+function setLocalRules(value){ if(value){localRules.addTo(map);}else{map.removeLayer(localRules);} }
+function setLocalRulesOpacity(value){ localRules.setOpacity(value/100); }
 function clearGeozoneConflicts(){ geozoneConflictLayer.clearLayers(); }
 function showGeozoneConflicts(features){
   clearGeozoneConflicts();
@@ -272,6 +307,7 @@ class MapPage(QWebEnginePage):
     no_fly_changed = Signal(list)
     shape_completed = Signal()
     inspection_requested = Signal(list)
+    local_inspection_requested = Signal(list)
 
     def javaScriptConsoleMessage(self, level, message, line_number, source_id):
         if message.startswith("ACMP_POLYGON:"):
@@ -289,6 +325,11 @@ class MapPage(QWebEnginePage):
         elif message.startswith("ACMP_INSPECT:"):
             try:
                 self.inspection_requested.emit(json.loads(message.removeprefix("ACMP_INSPECT:")))
+            except json.JSONDecodeError:
+                pass
+        elif message.startswith("ACMP_LOCAL_INSPECT:"):
+            try:
+                self.local_inspection_requested.emit(json.loads(message.removeprefix("ACMP_LOCAL_INSPECT:")))
             except json.JSONDecodeError:
                 pass
         super().javaScriptConsoleMessage(level, message, line_number, source_id)
@@ -310,6 +351,7 @@ from acmp.services.route_planner import (
 class MainWindow(QMainWindow):
     geozone_check_finished = Signal(int, object)
     context_geozone_check_finished = Signal(object)
+    local_rules_check_finished = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -329,6 +371,7 @@ class MainWindow(QMainWindow):
         self._geozone_review_dialog: QDialog | None = None
         self.geozone_check_finished.connect(self._show_geozone_check_result)
         self.context_geozone_check_finished.connect(self._show_context_geozone_result)
+        self.local_rules_check_finished.connect(self._show_local_rules_result)
         self.settings = QSettings("ACMP", "Mission Planner")
         self.ui_language = self.settings.value("ui_language", "de")
         self.geozone_zone_method = self.settings.value("geozone_zone_method", "global")
@@ -376,11 +419,12 @@ class MainWindow(QMainWindow):
         self.page.no_fly_changed.connect(self._no_fly_changed)
         self.page.shape_completed.connect(self._shape_completed)
         self.page.inspection_requested.connect(self._inspect_map_point)
+        self.page.local_inspection_requested.connect(self._inspect_local_rules_point)
         self.page.permissionRequested.connect(self._handle_web_permission)
         self.map_view = MapView()
         self.map_view.setPage(self.page)
         self.map_view.loadFinished.connect(
-            lambda _ok: self.js(f"setGeozoneOpacity({int(self.settings.value('geozone_opacity', 85))})")
+            lambda _ok: self._apply_saved_map_opacities()
         )
         self.map_view.setHtml(MAP_HTML, QUrl("https://acmp.local/"))
 
@@ -431,26 +475,52 @@ class MainWindow(QMainWindow):
         self.base_layer.currentTextChanged.connect(
             lambda text: self.js("setBase('satellite')" if self._canonical(text) == "Satellit" else "setBase('normal')")
         )
-        capture_layout.addWidget(self.base_layer)
+        map_controls = QHBoxLayout()
+        map_controls.addWidget(self.base_layer, 1)
+        zoom_button = QPushButton("Auf Flugbereich zoomen")
+        zoom_button.clicked.connect(lambda: self.js("zoomToArea()"))
+        map_controls.addWidget(zoom_button, 1)
+        capture_layout.addLayout(map_controls)
 
         geozone_group = QGroupBox("UAS-Geozonen")
-        geozone_layout = QHBoxLayout(geozone_group)
+        geozone_layout = QVBoxLayout(geozone_group)
+        geozone_controls = QHBoxLayout()
         self.geozones_toggle = QCheckBox("UAS-Geozonen (Deutschland)")
         self.geozones_toggle.setToolTip("Offizieller dipul/DFS-Kartenlayer, nur zur Orientierung.")
         self.geozones_toggle.toggled.connect(self._set_geozones_enabled)
-        geozone_layout.addWidget(self.geozones_toggle, 1)
+        geozone_controls.addWidget(self.geozones_toggle, 1)
         self.inspect_button = QPushButton("Was ist hier?")
         self.inspect_button.setCheckable(True)
         self.inspect_button.setEnabled(self.geozones_toggle.isChecked())
         self.inspect_button.toggled.connect(self.set_inspect_mode)
-        geozone_layout.addWidget(self.inspect_button, 1)
+        geozone_controls.addWidget(self.inspect_button, 1)
         self.geozone_review_button = QPushButton("Konflikte …")
         self.geozone_review_button.setEnabled(False)
         self.geozone_review_button.setToolTip("Zuletzt erkannte Überschneidungen erneut prüfen und bearbeiten.")
         self.geozone_review_button.clicked.connect(self._open_geozone_review)
-        geozone_layout.addWidget(self.geozone_review_button, 1)
+        geozone_controls.addWidget(self.geozone_review_button, 1)
+        geozone_layout.addLayout(geozone_controls)
+        local_rules_group = QGroupBox("Lokale Bestimmungen")
+        local_rules_layout = QHBoxLayout(local_rules_group)
+        self.local_rules_toggle = QCheckBox("Lokale Bestimmungen (Deutschland)")
+        self.local_rules_toggle.setToolTip("BfN-Schutzgebiete als Hinweis – keine pauschalen Flugverbote.")
+        self.local_rules_toggle.toggled.connect(self._set_local_rules_enabled)
+        local_rules_layout.addWidget(self.local_rules_toggle, 1)
+        self.local_rules_inspect_button = QPushButton("Was ist hier?")
+        self.local_rules_inspect_button.setCheckable(True)
+        self.local_rules_inspect_button.setEnabled(False)
+        self.local_rules_inspect_button.toggled.connect(self.set_local_inspect_mode)
+        local_rules_layout.addWidget(self.local_rules_inspect_button, 1)
+        local_rules_info = QPushButton("?")
+        local_rules_info.setFixedWidth(34)
+        local_rules_info.setToolTip("Hinweis zur rechtlichen Einordnung")
+        local_rules_info.clicked.connect(self._show_local_rules_info)
+        local_rules_layout.addWidget(local_rules_info)
+        geozone_layout.addWidget(local_rules_group)
         capture_layout.addWidget(geozone_group)
 
+        flight_area_group = QGroupBox("Flugbereich")
+        flight_area_layout = QVBoxLayout(flight_area_group)
         self.draw_button = QPushButton("Polygon")
         self.draw_button.setCheckable(True)
         self.draw_button.toggled.connect(self.set_drawing)
@@ -462,34 +532,34 @@ class MainWindow(QMainWindow):
         shape_row.addWidget(self.draw_button)
         shape_row.addWidget(self.rectangle_button)
         shape_row.addWidget(self.circle_button)
-        capture_layout.addLayout(shape_row)
+        flight_area_layout.addLayout(shape_row)
         undo_button = QPushButton("Letzten Punkt rückgängig")
         undo_button.clicked.connect(lambda: self.js("undo()"))
-        capture_layout.addWidget(undo_button)
-        zoom_button = QPushButton("Auf Flugbereich zoomen")
-        zoom_button.clicked.connect(lambda: self.js("zoomToArea()"))
-        capture_layout.addWidget(zoom_button)
+        flight_area_layout.addWidget(undo_button)
+        capture_layout.addWidget(flight_area_group)
 
-        capture_layout.addWidget(QLabel("<b>Sperrgebiete</b>"))
+        no_fly_group = QGroupBox("Sperrgebiete")
+        no_fly_layout = QVBoxLayout(no_fly_group)
         self.no_fly_button = QPushButton("Sperrgebiet zeichnen")
         self.no_fly_button.setCheckable(True)
         self.no_fly_button.setStyleSheet("QPushButton { background:#c92525; color:white; font-weight:600; } QPushButton:checked { background:#8e1515; }")
         self.no_fly_button.toggled.connect(self.set_no_fly_drawing)
-        capture_layout.addWidget(self.no_fly_button)
+        no_fly_layout.addWidget(self.no_fly_button)
         cancel_no_fly = QPushButton("Aktuelles Sperrgebiet verwerfen")
         cancel_no_fly.clicked.connect(lambda: self.js("cancelNoFly()"))
-        capture_layout.addWidget(cancel_no_fly)
+        no_fly_layout.addWidget(cancel_no_fly)
         self.zone_list = QListWidget()
         self.zone_list.setMinimumHeight(95)
         self.zone_list.currentRowChanged.connect(lambda row: self.js(f"selectNoFly({row})"))
         self.zone_list.itemDoubleClicked.connect(self.rename_no_fly_zone)
-        capture_layout.addWidget(self.zone_list)
+        no_fly_layout.addWidget(self.zone_list)
         delete_zone = QPushButton("Ausgewähltes Sperrgebiet löschen")
         delete_zone.clicked.connect(self.delete_selected_no_fly)
-        capture_layout.addWidget(delete_zone)
+        no_fly_layout.addWidget(delete_zone)
         clear_button = QPushButton("Alles löschen")
         clear_button.clicked.connect(lambda: self.js("clearAll()"))
-        capture_layout.addWidget(clear_button)
+        no_fly_layout.addWidget(clear_button)
+        capture_layout.addWidget(no_fly_group)
 
         capture_layout.addWidget(QLabel("<hr>"))
         self.count_label = QLabel("Punkte: 0")
@@ -516,7 +586,7 @@ class MainWindow(QMainWindow):
         coordinate_group.toggled.connect(self.coordinates.setVisible)
         coordinate_group.toggled.connect(copy_button.setVisible)
         capture_layout.addWidget(coordinate_group, 1)
-        tabs.addTab(capture, "Karte & Gebiet")
+        tabs.addTab(capture, "Fluggebiet planen")
 
         # Tab 2: Mapping-Mission einstellen
         flight = QWidget()
@@ -526,9 +596,9 @@ class MainWindow(QMainWindow):
         flight_heading = QLabel("Flugeinstellungen")
         flight_heading.setStyleSheet("font-size:20px;font-weight:600;")
         flight_layout.addWidget(flight_heading)
-        flight_layout.addWidget(QLabel("Die Bahnrichtung wird mit 0° = Ost/West und 90° = Nord/Süd angegeben."))
 
-        basic_form = QFormLayout()
+        basic_group = QGroupBox("Routenparameter")
+        basic_form = QFormLayout(basic_group)
         self.altitude = self._number(60, 10, 500, 1, " m")
         self.speed = self._number(5, 1, 15, 0.5, " m/s")
         self.path_spacing = self._number(20, 1, 250, 1, " m")
@@ -557,9 +627,9 @@ class MainWindow(QMainWindow):
         basic_form.addRow("Routenmodus:", self.route_mode)
         basic_form.addRow("Stützpunkt-Abstand:", self.support_spacing)
         self._direction_mode_changed(self.direction_mode.currentText())
-        flight_layout.addLayout(basic_form)
-        flight_layout.addWidget(QLabel("<b>Kamera & Photogrammetrie</b>"))
-        photo_form = QFormLayout()
+        flight_layout.addWidget(basic_group)
+        photo_group = QGroupBox("Kamera & Photogrammetrie")
+        photo_form = QFormLayout(photo_group)
         self.side_overlap = self._number(70, 0, 95, 1, " %")
         self.forward_overlap = self._number(80, 0, 95, 1, " %")
         self.photo_distance = self._number(5, 0.5, 500, 0.5, " m")
@@ -571,9 +641,9 @@ class MainWindow(QMainWindow):
         photo_form.addRow("Foto alle (Distanz):", self.photo_distance)
         photo_form.addRow("Kamera-Neigung:", self.gimbal_pitch)
         photo_form.addRow("Aktion:", self.waypoint_action)
-        flight_layout.addLayout(photo_form)
-        flight_layout.addWidget(QLabel("<b>Missionsgrenze</b>"))
-        limit_form = QFormLayout()
+        flight_layout.addWidget(photo_group)
+        limit_group = QGroupBox("Missionsgrenze")
+        limit_form = QFormLayout(limit_group)
         self.max_waypoints = self._number(200, 2, 65535, 1, " Punkte", decimals=0)
         self.max_flight_minutes = self._number(20, 1, 240, 1, " min", decimals=0)
         self.split_mode = QComboBox()
@@ -593,7 +663,7 @@ class MainWindow(QMainWindow):
         ])
         limit_form.addRow("Max. Wegpunkte:", self.max_waypoints)
         limit_form.addRow("Max. Flugzeit / Mission:", self.max_flight_minutes)
-        limit_form.addRow("Aufteilung:", self.split_mode)
+        limit_form.addRow("Aufteilung auf Missionen:", self.split_mode)
         limit_form.addRow("Bei Flugende:", self.finish_action)
         limit_form.addRow("Bei Signalverlust:", self.signal_loss_action)
         self.outside_area_mode = QComboBox()
@@ -602,7 +672,7 @@ class MainWindow(QMainWindow):
         self.no_fly_mode.addItems(["Sperrgebiet umfliegen", "Sperrgebiet durchfliegen"])
         limit_form.addRow("Außerhalb des Flugbereichs:", self.outside_area_mode)
         limit_form.addRow("Bei Sperrgebieten:", self.no_fly_mode)
-        flight_layout.addLayout(limit_form)
+        flight_layout.addWidget(limit_group)
         self.mission_summary = QLabel("Noch keine Route generiert.")
         self.mission_summary.setWordWrap(True)
         self.waypoint_warning = QLabel("")
@@ -633,15 +703,17 @@ class MainWindow(QMainWindow):
         export_title = QLabel("Exportieren & Speichern")
         export_title.setStyleSheet("font-size:20px;font-weight:600;")
         export_layout.addWidget(export_title)
-        export_layout.addWidget(QLabel("<b>KMZ-Datei speichern</b>"))
-        export_layout.addWidget(QLabel("Erzeugt ein DJI-WPML-KMZ mit <code>template.kml</code> und <code>waylines.wpml</code>."))
-        export_layout.addWidget(QLabel("KMZ-Dateiname / Missionsname"))
+        kmz_group = QGroupBox("KMZ-Datei speichern")
+        kmz_layout = QVBoxLayout(kmz_group)
+        kmz_layout.addWidget(QLabel("Erzeugt ein DJI-WPML-KMZ mit <code>template.kml</code> und <code>waylines.wpml</code>."))
+        kmz_layout.addWidget(QLabel("KMZ-Dateiname / Missionsname"))
         self.mission_name = QLineEdit("ACMP_Mapping_Mission")
         self.mission_name.setPlaceholderText("Missionsname")
-        export_layout.addWidget(self.mission_name)
+        kmz_layout.addWidget(self.mission_name)
         save_kmz = QPushButton("KMZ-Datei speichern …")
         save_kmz.clicked.connect(self.export_kmz_file)
-        export_layout.addWidget(save_kmz)
+        kmz_layout.addWidget(save_kmz)
+        export_layout.addWidget(kmz_group)
         preview_group = QGroupBox("Vorschaubilder – experimentell")
         preview_layout = QVBoxLayout(preview_group)
         preview_note = QLabel("Die Bilddateien werden erstellt, aber DJI Fly übernimmt externe Vorschaubilder möglicherweise nicht.")
@@ -662,6 +734,8 @@ class MainWindow(QMainWindow):
         export_layout.addWidget(preview_group)
         export_layout.addStretch(1)
         tabs.addTab(export, "Exportieren")
+        self._restore_last_flight_settings()
+        self._connect_flight_settings_autosave()
         return side
 
     @staticmethod
@@ -801,6 +875,11 @@ class MainWindow(QMainWindow):
         opacity.setSuffix(" %")
         opacity.setValue(int(self.settings.value("geozone_opacity", 85)))
         geozone_form.addRow("Opacity" if english else "Deckkraft", opacity)
+        local_opacity = QSpinBox(geozones)
+        local_opacity.setRange(10, 100)
+        local_opacity.setSuffix(" %")
+        local_opacity.setValue(int(self.settings.value("local_rules_opacity", 35)))
+        geozone_form.addRow("Local-rules opacity" if english else "Deckkraft lokaler Regeln", local_opacity)
         zone_method = QComboBox(geozones)
         zone_method.addItem("Global – full official area" if english else "Global – vollständige offizielle Fläche", "global")
         zone_method.addItem("Fine – clipped intersection areas" if english else "Fein – zugeschnittene Schnittflächen", "fine")
@@ -823,11 +902,13 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self.settings.setValue("geozone_opacity", opacity.value())
+        self.settings.setValue("local_rules_opacity", local_opacity.value())
         self.settings.setValue("geozone_zone_method", zone_method.currentData())
         self.settings.setValue("ui_language", language.currentData())
         self.settings.sync()
         self.geozone_zone_method = zone_method.currentData()
         self.js(f"setGeozoneOpacity({opacity.value()})")
+        self.js(f"setLocalRulesOpacity({local_opacity.value()})")
         if self.ui_language != language.currentData():
             self.ui_language = language.currentData()
             self._apply_language()
@@ -839,10 +920,36 @@ class MainWindow(QMainWindow):
 
     def _set_geozones_enabled(self, enabled: bool):
         self.js(f"setGeozones({str(enabled).lower()})")
-        self.geozone_review_button.setEnabled(enabled and bool(self._last_geozone_features))
+        # Mit vorhandener Flugfläche darf der Knopf die Prüfung nachträglich starten.
+        # Ohne aktivierte UAS-Zonen bleibt er dagegen immer deaktiviert.
+        self.geozone_review_button.setEnabled(bool(enabled) and len(self.points) >= 3)
         self.inspect_button.setEnabled(enabled)
         if not enabled and self.inspect_button.isChecked():
             self.inspect_button.setChecked(False)
+
+    def _set_local_rules_enabled(self, enabled: bool):
+        self.js(f"setLocalRules({str(enabled).lower()})")
+        self.local_rules_inspect_button.setEnabled(enabled)
+        if not enabled and self.local_rules_inspect_button.isChecked():
+            self.local_rules_inspect_button.setChecked(False)
+
+    def _apply_saved_map_opacities(self):
+        self.js(f"setGeozoneOpacity({int(self.settings.value('geozone_opacity', 85))})")
+        self.js(f"setLocalRulesOpacity({int(self.settings.value('local_rules_opacity', 35))})")
+
+    def _show_local_rules_info(self):
+        english = self.ui_language == "en"
+        QMessageBox.information(
+            self,
+            "Local rules (Germany)" if english else "Lokale Bestimmungen (Deutschland)",
+            (
+                "This layer shows selected official BfN protected-area categories: landscape protection areas, nature parks, biosphere reserves and national natural monuments. "
+                "It is a planning hint only, not a general no-fly layer. Local protection regulations, municipal rules, approvals and current restrictions can differ by area and must be checked separately."
+                if english else
+                "Dieser Layer zeigt ausgewählte offizielle BfN-Schutzgebietskategorien: Landschaftsschutzgebiete, Naturparke, Biosphärenreservate und Nationale Naturmonumente. "
+                "Er ist nur ein Planungshinweis und keine pauschale Flugverbotskarte. Örtliche Schutzverordnungen, kommunale Regeln, Genehmigungen und aktuelle Einschränkungen können je Gebiet abweichen und müssen separat geprüft werden."
+            ),
+        )
 
     def _apply_language(self):
         """Übersetzt alle sichtbaren Standardtexte; interne Routenwerte bleiben kanonisch deutsch."""
@@ -861,13 +968,16 @@ class MainWindow(QMainWindow):
         self.settings_action.setText(translate("Einstellungen"))
         for action in self.findChildren(QAction):
             action.setText(translate(action.text()))
-        for widget_type in (QLabel, QPushButton):
+        for widget_type in (QLabel, QPushButton, QCheckBox):
             for widget in self.findChildren(widget_type):
                 widget.setText(translate(widget.text()))
         for group_box in self.findChildren(QGroupBox):
             group_box.setTitle(translate(group_box.title()))
         for field in self.findChildren(QLineEdit):
             field.setPlaceholderText(translate(field.placeholderText()))
+        for widget in self.findChildren(QWidget):
+            if widget.toolTip():
+                widget.setToolTip(translate(widget.toolTip()))
         for combo in self.findChildren(QComboBox):
             for index in range(combo.count()):
                 combo.setItemText(index, translate(combo.itemText(index)))
@@ -1044,6 +1154,8 @@ class MainWindow(QMainWindow):
             self.no_fly_button.setChecked(False)
         if active and self.inspect_button.isChecked():
             self.inspect_button.setChecked(False)
+        if active and self.local_rules_inspect_button.isChecked():
+            self.local_rules_inspect_button.setChecked(False)
         self.js(f"setDrawing({str(active).lower()})")
         # Die Prüfung gehört zum Abschluss der Fläche, nicht zu jedem Klick.
         if not active:
@@ -1055,6 +1167,8 @@ class MainWindow(QMainWindow):
             self.draw_button.setChecked(False)
         if active and self.inspect_button.isChecked():
             self.inspect_button.setChecked(False)
+        if active and self.local_rules_inspect_button.isChecked():
+            self.local_rules_inspect_button.setChecked(False)
         self.js(f"setNoFlyDrawing({str(active).lower()})")
 
     def set_inspect_mode(self, active: bool):
@@ -1062,9 +1176,22 @@ class MainWindow(QMainWindow):
             self.draw_button.setChecked(False)
         if active and self.no_fly_button.isChecked():
             self.no_fly_button.setChecked(False)
+        if active and self.local_rules_inspect_button.isChecked():
+            self.local_rules_inspect_button.setChecked(False)
         self.js(f"setInspect({str(active).lower()})")
         if active:
             self.statusBar().showMessage("Auf einen Punkt in der Karte klicken, um die UAS-Geozonen zu prüfen.", 5000)
+
+    def set_local_inspect_mode(self, active: bool):
+        if active and self.inspect_button.isChecked():
+            self.inspect_button.setChecked(False)
+        if active and self.draw_button.isChecked():
+            self.draw_button.setChecked(False)
+        if active and self.no_fly_button.isChecked():
+            self.no_fly_button.setChecked(False)
+        self.js(f"setLocalInspect({str(active).lower()})")
+        if active:
+            self.statusBar().showMessage("Auf einen Punkt in der Karte klicken, um lokale Schutzgebietshinweise zu prüfen.", 5000)
 
     def start_shape(self, shape: str):
         if self.draw_button.isChecked():
@@ -1073,6 +1200,8 @@ class MainWindow(QMainWindow):
             self.no_fly_button.setChecked(False)
         if self.inspect_button.isChecked():
             self.inspect_button.setChecked(False)
+        if self.local_rules_inspect_button.isChecked():
+            self.local_rules_inspect_button.setChecked(False)
         label = "Rechteck" if shape == "rectangle" else "Kreis"
         self.statusBar().showMessage(f"{label}: Auf der Karte klicken, gedrückt halten und aufziehen.", 5000)
         self.js(f"setShapeDrawing('{shape}')")
@@ -1214,6 +1343,82 @@ class MainWindow(QMainWindow):
             self.inspect_button.setChecked(False)
         self._start_context_geozone_check(coordinate)
 
+    def _inspect_local_rules_point(self, coordinate: list):
+        if self.local_rules_inspect_button.isChecked():
+            self.local_rules_inspect_button.setChecked(False)
+        if not isinstance(coordinate, list) or len(coordinate) != 2:
+            return
+        try:
+            lat, lon = float(coordinate[0]), float(coordinate[1])
+        except (TypeError, ValueError):
+            return
+        delta = 0.00002
+        probe = [(lat - delta, lon - delta), (lat - delta, lon + delta),
+                 (lat + delta, lon + delta), (lat + delta, lon - delta)]
+        self.statusBar().showMessage("Prüfe lokale Schutzgebietshinweise an dieser Stelle …", 2500)
+        threading.Thread(
+            target=self._run_local_rules_check,
+            args=(probe,),
+            name="acmp-local-rules-check",
+            daemon=True,
+        ).start()
+
+    def _run_local_rules_check(self, probe: list[tuple[float, float]]):
+        try:
+            latitudes, longitudes = zip(*probe)
+            # Der BfN-WFS folgt für EPSG:4326 der offiziellen Achsenreihenfolge Breite/Länge.
+            bbox = f"{min(latitudes)},{min(longitudes)},{max(latitudes)},{max(longitudes)},EPSG:4326"
+            probe_shape = Polygon([(lon, lat) for lat, lon in probe])
+
+            def load_layer(layer: str) -> list[dict]:
+                params = {
+                    "SERVICE": "WFS", "VERSION": "2.0.0", "REQUEST": "GetFeature",
+                    "typeNames": f"bfn_sch_Schutzgebiet:{layer}", "outputFormat": "GEOJSON", "bbox": bbox, "count": 30,
+                }
+                url = f"https://geodienste.bfn.de/ogc/wfs/schutzgebiet?{urlencode(params)}"
+                with urlopen(url, timeout=8.0) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+                return [
+                    feature for feature in data.get("features", [])
+                    if shape(feature.get("geometry")).intersects(probe_shape)
+                ]
+
+            found: list[tuple[str, dict]] = []
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(load_layer, layer): label for layer, label in LOCAL_RULE_LAYERS.items()}
+                for future in as_completed(futures):
+                    try:
+                        found.extend((futures[future], feature) for feature in future.result())
+                    except (OSError, TypeError, ValueError, UnicodeError, json.JSONDecodeError):
+                        continue
+        except (OSError, TypeError, ValueError, UnicodeError):
+            found = []
+        self.local_rules_check_finished.emit(found)
+
+    def _show_local_rules_result(self, found: object):
+        if not self.local_rules_toggle.isChecked():
+            return
+        english = self.ui_language == "en"
+        title = "Local rules (Germany)" if english else "Lokale Bestimmungen (Deutschland)"
+        if not found:
+            QMessageBox.information(
+                self, title,
+                "No configured local-rule protected area was found at this position." if english
+                else "An dieser Position wurde kein konfiguriertes Schutzgebiet für lokale Bestimmungen gefunden.",
+            )
+            return
+        entries = []
+        for label, feature in found:
+            properties = feature.get("properties", {})
+            name = properties.get("NAME") or properties.get("name") or properties.get("BEZEICHNUNG")
+            entries.append(f"• {label}" + (f": {name}" if name else ""))
+        notice = (
+            "These are planning hints only. Local rules, protection regulations and approvals may differ and must be checked separately."
+            if english else
+            "Dies sind nur Planungshinweise. Örtliche Regeln, Schutzverordnungen und Genehmigungen können abweichen und müssen separat geprüft werden."
+        )
+        QMessageBox.information(self, title, "\n".join(entries) + f"\n\n{notice}")
+
     def _start_context_geozone_check(self, coordinate):
         if not isinstance(coordinate, list) or len(coordinate) != 2:
             return
@@ -1308,6 +1513,57 @@ class MainWindow(QMainWindow):
             self._geozone_feature_key(feature, index): "ignore"
             for index, feature in enumerate(self._last_geozone_features)
         }
+
+    def _restore_last_flight_settings(self):
+        """Stellt die zuletzt automatisch gespeicherten Flugeinstellungen wieder her."""
+        raw = self.settings.value("last_flight_settings", "")
+        if not raw:
+            return
+        try:
+            values = json.loads(raw) if isinstance(raw, str) else raw
+            if not isinstance(values, dict):
+                return
+            number_fields = [
+                (self.altitude, "altitude"), (self.speed, "speed"), (self.path_spacing, "path_spacing"),
+                (self.direction, "direction"), (self.support_spacing, "support_spacing"),
+                (self.side_overlap, "side_overlap"), (self.forward_overlap, "forward_overlap"),
+                (self.photo_distance, "photo_distance"), (self.gimbal_pitch, "gimbal_pitch"),
+                (self.max_waypoints, "max_waypoints"), (self.max_flight_minutes, "max_flight_minutes"),
+            ]
+            for field, key in number_fields:
+                if key in values:
+                    field.setValue(float(values[key]))
+            for field, key in [
+                (self.direction_mode, "direction_mode"), (self.route_mode, "route_mode"),
+                (self.waypoint_action, "waypoint_action"), (self.split_mode, "split_mode"),
+                (self.finish_action, "finish_action"), (self.signal_loss_action, "signal_loss_action"),
+                (self.outside_area_mode, "outside_area_mode"), (self.no_fly_mode, "no_fly_mode"),
+            ]:
+                if key in values and values[key] in [field.itemText(index) for index in range(field.count())]:
+                    field.setCurrentText(values[key])
+            self._direction_mode_changed(self.direction_mode.currentText())
+            self._route_mode_changed(self.route_mode.currentText())
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return
+
+    def _connect_flight_settings_autosave(self):
+        number_fields = [
+            self.altitude, self.speed, self.path_spacing, self.direction, self.support_spacing,
+            self.side_overlap, self.forward_overlap, self.photo_distance, self.gimbal_pitch,
+            self.max_waypoints, self.max_flight_minutes,
+        ]
+        combo_fields = [
+            self.direction_mode, self.route_mode, self.waypoint_action, self.split_mode,
+            self.finish_action, self.signal_loss_action, self.outside_area_mode, self.no_fly_mode,
+        ]
+        for field in number_fields:
+            field.valueChanged.connect(self._save_last_flight_settings)
+        for field in combo_fields:
+            field.currentTextChanged.connect(self._save_last_flight_settings)
+
+    def _save_last_flight_settings(self, *_args):
+        self.settings.setValue("last_flight_settings", json.dumps(self._preset_values(), ensure_ascii=False))
+        self.settings.sync()
         self._geozone_review_base_zones = json.loads(json.dumps(self.no_fly_zones))
         self._geozone_review_base_names = list(self.no_fly_names)
         self.geozone_review_button.setEnabled(True)
@@ -1315,7 +1571,11 @@ class MainWindow(QMainWindow):
 
     def _open_geozone_review(self):
         """Öffnet die letzte Konfliktprüfung erneut, ohne die Karte neu zu zeichnen."""
-        if not self.geozones_toggle.isChecked() or not self._last_geozone_features:
+        if not self.geozones_toggle.isChecked():
+            return
+        if not self._last_geozone_features:
+            if len(self.points) >= 3:
+                self._queue_geozone_check()
             return
         if self._geozone_review_dialog and self._geozone_review_dialog.isVisible():
             self._geozone_review_dialog.raise_()
@@ -1517,7 +1777,7 @@ class MainWindow(QMainWindow):
 
     def generate_mission(self):
         if len(self.points) < 3:
-            QMessageBox.warning(self, "Polygon fehlt", "Bitte zeichne zuerst mindestens drei Punkte im Tab „Karte & Gebiet“.")
+            QMessageBox.warning(self, "Polygon fehlt", "Bitte zeichne zuerst mindestens drei Punkte im Tab „Fluggebiet planen“.")
             return
         self.force_single_mission = False
         self.force_one_button.setVisible(False)
