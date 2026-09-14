@@ -16,7 +16,8 @@ ACMP is a desktop tool for drawing mapping areas on an interactive map, planning
 - Configure essential flight settings such as altitude, speed, path spacing, and route direction.
 - Set mission limits for maximum waypoints and flight duration.
 - Automatically split large routes into multiple missions when limits are exceeded.
-- Configure camera actions and photo spacing for photogrammetry workflows.
+- Consumer profiles convert the desired photo spacing into a feasible controller interval and matching mapping speed; interval shooting is started manually on the controller.
+- Prosumer/Enterprise profiles retain the WPML distance-trigger export for compatible mapping missions.
 - Show official **Germany-only** UAS geozones and inspect affected areas before route planning.
 - Highlight or exclude individual geozone conflicts, including clipped intersection areas.
 - Show selected Germany-wide protected-area layers as local-rule hints; these are not blanket no-fly zones.
@@ -40,6 +41,19 @@ The map and address search require an internet connection.
 6. Generate the route and inspect its waypoints on the map.
 7. Save the editable project from **File → Save As** when you want to continue later.
 8. Export the planned mission as a DJI-compatible KMZ file from **Export**.
+
+## Photo capture profiles
+
+The selected drone category in **Settings** determines the capture strategy.
+
+- **Consumer:** Enter the desired photo spacing and a preferred mapping speed. ACMP evaluates the profile's supported controller intervals, chooses a feasible interval/speed combination, and displays the interval, exported speed and resulting spacing. Start interval shooting manually before the mapping section; the KMZ intentionally contains no unsupported automatic distance trigger.
+- **Prosumer / Enterprise:** The selected distance-action continues to be exported as a native WPML distance trigger.
+
+Enter the camera's sensor format (for example `1/1.3`, `4/3`, `APS-C`, or a direct active diagonal such as `9.6 mm`), its **real** focal length in mm, and the image format. Together with flight height, gimbal angle and the requested overlaps, ACMP calculates the ground footprint, photo spacing and path spacing. The flat-ground calculation assumes the gimbal points in the flight direction; terrain and obstacles are not modelled.
+
+Camera data is configured in **Settings → General**. The model menu includes the DJI Mini, Mavic and Lito 1/X1 families and fills the main-camera profile automatically. `Custom` leaves all three camera fields under your control; selected profiles can also be overridden, for example for a lens/crop variant. Multi-camera and zoom drones use their wide/main mapping camera profile.
+
+The editable registry is [acmp/data/drone_profiles.json](acmp/data/drone_profiles.json). Add a new object to `profiles` with a unique `key`, `label`, `category` (`consumer` or `prosumer_enterprise`), `sensor_format`, real `focal_length_mm`, and `image_ratio` (`4:3`, `3:2`, or `16:9`). ACMP validates the file on startup and then exposes the entry in the model menu.
 
 ## DJI RC Import Workflow
 

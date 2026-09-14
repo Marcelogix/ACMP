@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import threading
 import time
 import zipfile
@@ -65,6 +66,8 @@ UI_EN = {
     "Richtungsvorgabe:": "Direction mode:", "Bahnrichtung:": "Path direction:", "Routenmodus:": "Route mode:",
     "Stützpunkt-Abstand:": "Support-point spacing:", "Kamera & Photogrammetrie": "Camera & photogrammetry",
     "Seitliche Überlappung:": "Side overlap:", "Vorwärtsüberlappung:": "Forward overlap:", "Foto alle (Distanz):": "Photo every (distance):",
+    "Gewünschter Bildabstand:": "Desired photo spacing:", "Aufnahmeplan:": "Capture plan:",
+    "Bevorzugte Mapping-Geschwindigkeit:": "Preferred mapping speed:",
     "Kamera-Neigung:": "Gimbal pitch:", "Aktion:": "Action:", "Missionsgrenze": "Mission limits",
     "Max. Wegpunkte:": "Max. waypoints:", "Max. Flugzeit / Mission:": "Max. flight time / mission:", "Aufteilung auf Missionen:": "Split across missions:",
     "Bei Flugende:": "At flight end:", "Bei Signalverlust:": "On signal loss:",
@@ -353,6 +356,9 @@ class MapView(QWebEngineView):
 
 
 from acmp.services.kmz_exporter import build_dji_kmz
+from acmp.services.capture_strategy import capabilities_for, choose_capture_plan
+from acmp.services.photogrammetry import coverage_geometry
+from acmp.services.drone_profiles import DRONE_PROFILES, PROFILE_BY_KEY
 from acmp.services.route_planner import (
     add_overshoot_turns, centripetal_catmull_rom_route, count_direction_changes, densify_route, estimated_route_seconds, generate_lawnmower_route,
     optimal_direction_deg, plan_missions, polygon_area_m2, route_length_m, shortest_route_direction_deg,
@@ -373,6 +379,7 @@ class MainWindow(QMainWindow):
         self.generated_route: list[list[float]] = []
         self.generated_missions: list[list[list[float]]] = []
         self.overshoot_paths: list[list[list[float]]] = []
+        self.curve_speed_point_keys: set[tuple[float, float]] = set()
         self.reduced_support_points = False
         self.keep_support_route_inside = False
         self.reduced_overshoot_points = False
@@ -438,7 +445,7 @@ class MainWindow(QMainWindow):
         self.map_view = MapView()
         self.map_view.setPage(self.page)
         self.map_view.loadFinished.connect(
-            lambda _ok: self._apply_saved_map_opacities()
+            lambda _ok: self._apply_saved_map_preferences()
         )
         self.map_view.setHtml(MAP_HTML, QUrl("https://acmp.local/"))
 
@@ -451,6 +458,14 @@ class MainWindow(QMainWindow):
         splitter.setSizes([1020, 480])
         self.setCentralWidget(splitter)
         self._apply_language()
+
+    def _setting_bool(self, key: str, default: bool = False) -> bool:
+        value = self.settings.value(key, default)
+        return value if isinstance(value, bool) else str(value).strip().lower() in {"1", "true", "yes"}
+
+    def _save_global_setting(self, key: str, value):
+        self.settings.setValue(key, value)
+        self.settings.sync()
 
     def _build_sidebar(self):
         side = QFrame()
@@ -486,9 +501,12 @@ class MainWindow(QMainWindow):
         capture_layout.addWidget(QLabel("Kartenansicht"))
         self.base_layer = QComboBox()
         self.base_layer.addItems(["Karte", "Satellit"])
+        saved_base_layer = str(self.settings.value("base_layer", "Karte"))
+        self.base_layer.setCurrentText(saved_base_layer if saved_base_layer in {"Karte", "Satellit"} else "Karte")
         self.base_layer.currentTextChanged.connect(
             lambda text: self.js("setBase('satellite')" if self._canonical(text) == "Satellit" else "setBase('normal')")
         )
+        self.base_layer.currentTextChanged.connect(lambda text: self._save_global_setting("base_layer", self._canonical(text)))
         map_controls = QHBoxLayout()
         map_controls.addWidget(self.base_layer, 1)
         zoom_button = QPushButton("Auf Flugbereich zoomen")
@@ -502,6 +520,7 @@ class MainWindow(QMainWindow):
         self.geozones_toggle = QCheckBox("UAS-Geozonen (Deutschland)")
         self.geozones_toggle.setToolTip("Offizieller dipul/DFS-Kartenlayer, nur zur Orientierung.")
         self.geozones_toggle.toggled.connect(self._set_geozones_enabled)
+        self.geozones_toggle.toggled.connect(lambda value: self._save_global_setting("geozones_enabled", value))
         geozone_controls.addWidget(self.geozones_toggle, 1)
         self.inspect_button = QPushButton("Was ist hier?")
         self.inspect_button.setCheckable(True)
@@ -514,17 +533,20 @@ class MainWindow(QMainWindow):
         self.geozone_review_button.clicked.connect(self._open_geozone_review)
         geozone_controls.addWidget(self.geozone_review_button, 1)
         geozone_layout.addLayout(geozone_controls)
+        self.geozones_toggle.setChecked(self._setting_bool("geozones_enabled"))
         local_rules_group = QGroupBox("Lokale Bestimmungen")
         local_rules_layout = QHBoxLayout(local_rules_group)
         self.local_rules_toggle = QCheckBox("Lokale Bestimmungen (Deutschland)")
         self.local_rules_toggle.setToolTip("BfN-Schutzgebiete als Hinweis – keine pauschalen Flugverbote.")
         self.local_rules_toggle.toggled.connect(self._set_local_rules_enabled)
+        self.local_rules_toggle.toggled.connect(lambda value: self._save_global_setting("local_rules_enabled", value))
         local_rules_layout.addWidget(self.local_rules_toggle, 1)
         self.local_rules_inspect_button = QPushButton("Was ist hier?")
         self.local_rules_inspect_button.setCheckable(True)
         self.local_rules_inspect_button.setEnabled(False)
         self.local_rules_inspect_button.toggled.connect(self.set_local_inspect_mode)
         local_rules_layout.addWidget(self.local_rules_inspect_button, 1)
+        self.local_rules_toggle.setChecked(self._setting_bool("local_rules_enabled"))
         local_rules_info = QPushButton("?")
         local_rules_info.setFixedWidth(34)
         local_rules_info.setToolTip("Hinweis zur rechtlichen Einordnung")
@@ -615,7 +637,7 @@ class MainWindow(QMainWindow):
         basic_form = QFormLayout(basic_group)
         self.basic_form = basic_form
         self.altitude = self._number(60, 10, 500, 1, " m")
-        self.speed = self._number(5, 1, 15, 0.5, " m/s")
+        self.speed = self._number(5, 0.5, 15, 0.5, " m/s")
         self.curve_speed = self._number(3, 0.5, 15, 0.5, " m/s")
         self.curve_speed.setToolTip("Wird nur für enge Kurven bei Stützpunkten und Overshooting verwendet.")
         self.path_spacing = self._number(20, 1, 250, 1, " m")
@@ -688,18 +710,31 @@ class MainWindow(QMainWindow):
         self._direction_mode_changed(self.direction_mode.currentText())
         flight_layout.addWidget(basic_group)
         photo_group = QGroupBox("Kamera & Photogrammetrie")
+        self.photo_group = photo_group
         photo_form = QFormLayout(photo_group)
+        self.photo_form = photo_form
         self.side_overlap = self._number(70, 0, 95, 1, " %")
         self.forward_overlap = self._number(80, 0, 95, 1, " %")
+        self.sensor_format = QLineEdit("1/1.3")
+        self.sensor_format.setPlaceholderText("z. B. 1/1.3, 4/3 oder 9.6 mm")
+        self.sensor_format.setToolTip("Optisches Sensorformat oder direkte aktive Sensordiagonale. Brennweite muss die reale Brennweite in mm sein, nicht KB-äquivalent.")
+        self.focal_length = self._number(8.8, 0.1, 200, 0.1, " mm")
+        self.focal_length.setToolTip("Reale Brennweite des Objektivs in mm, nicht 35-mm-/KB-Äquivalent.")
+        self.image_ratio = QComboBox()
+        self.image_ratio.addItems(["4:3", "3:2", "16:9"])
         self.photo_distance = self._number(5, 0.5, 500, 0.5, " m")
         self.gimbal_pitch = self._number(-90, -90, 0, 1, " °")
         self.waypoint_action = QComboBox()
         self.waypoint_action.addItems(["Foto bei jedem Wegpunkt", "Foto nach Distanzintervall", "Keine Aktion", "2 s schweben"])
         photo_form.addRow("Seitliche Überlappung:", self.side_overlap)
         photo_form.addRow("Vorwärtsüberlappung:", self.forward_overlap)
-        photo_form.addRow("Foto alle (Distanz):", self.photo_distance)
+        photo_form.addRow("Gewünschter Bildabstand:", self.photo_distance)
         photo_form.addRow("Kamera-Neigung:", self.gimbal_pitch)
         photo_form.addRow("Aktion:", self.waypoint_action)
+        self.capture_plan_label = QLabel()
+        self.capture_plan_label.setWordWrap(True)
+        self.capture_plan_label.setStyleSheet("color:#31506f;")
+        photo_form.addRow("Aufnahmeplan:", self.capture_plan_label)
         flight_layout.addWidget(photo_group)
         limit_group = QGroupBox("Missionsgrenze")
         limit_form = QFormLayout(limit_group)
@@ -801,6 +836,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(export, "Exportieren")
         self._restore_last_flight_settings()
         self._connect_flight_settings_autosave()
+        self._update_photogrammetry_geometry()
         return side
 
     @staticmethod
@@ -847,10 +883,10 @@ class MainWindow(QMainWindow):
             self._set_route_option_visible(self.support_options, support_mode)
             self._set_route_option_visible(self.overshoot_distance, overshoot_mode)
             self._set_route_option_visible(self.overshoot_options, overshoot_mode)
-        if mode == "Standard (DJI-Näherung: glatte Kurven)" and not self.flight_path_preview.isChecked():
-            self.flight_path_preview.setChecked(True)
         if hasattr(self, "generated_missions"):
             self._refresh_mission_display()
+        if hasattr(self, "capture_plan_label"):
+            self._update_capture_strategy_ui()
 
     def _set_route_option_visible(self, field, visible: bool):
         field.setVisible(visible)
@@ -886,6 +922,116 @@ class MainWindow(QMainWindow):
         self.route_mode.blockSignals(False)
         self._route_mode_changed(self.route_mode.currentText())
 
+    def _drone_capabilities(self):
+        return capabilities_for(str(self.settings.value("drone_category", "consumer")))
+
+    def _capture_plan(self):
+        """Translate photogrammetric spacing into the selected drone's capture method."""
+        return choose_capture_plan(self.photo_distance.value(), self.speed.value(), self._drone_capabilities())
+
+    def _update_photogrammetry_geometry(self, *_args):
+        """Derive route spacing and photo spacing from camera geometry and overlap."""
+        if not hasattr(self, "sensor_format"):
+            return
+        try:
+            geometry = coverage_geometry(
+                self.altitude.value(), self.gimbal_pitch.value(), self.focal_length.value(),
+                self.sensor_format.text(), self.image_ratio.currentText(),
+                self.forward_overlap.value(), self.side_overlap.value(),
+            )
+        except ValueError as error:
+            message = (
+                "Camera profile is invalid. Enter a valid sensor format, focal length, image ratio, and gimbal angle."
+                if self.ui_language == "en" else str(error)
+            )
+            self.capture_plan_label.setText(f"<span style='color:#b42318'>{escape(message)}</span>")
+            return
+        self.photo_distance.blockSignals(True)
+        self.path_spacing.blockSignals(True)
+        self.photo_distance.setValue(geometry.photo_distance_m)
+        self.path_spacing.setValue(geometry.path_spacing_m)
+        self.photo_distance.blockSignals(False)
+        self.path_spacing.blockSignals(False)
+        if self.ui_language == "en":
+            self.photo_distance.setToolTip(f"Calculated from {geometry.footprint_along_m:.2f} m image length and forward overlap.")
+            self.path_spacing.setToolTip(f"Calculated from {geometry.footprint_cross_m:.2f} m image width and side overlap.")
+        else:
+            self.photo_distance.setToolTip(f"Automatisch aus {geometry.footprint_along_m:.2f} m Bildlänge und Vorwärtsüberlappung berechnet.")
+            self.path_spacing.setToolTip(f"Automatisch aus {geometry.footprint_cross_m:.2f} m Bildbreite und seitlicher Überlappung berechnet.")
+        self._update_capture_strategy_ui()
+
+    def _effective_speed(self) -> float:
+        """The speed actually exported and used for duration estimates."""
+        return self._capture_plan().flight_speed_mps
+
+    def _export_photo_mode(self) -> str:
+        """Consumer interval shooting is deliberately never encoded as WPML trigger."""
+        if self._drone_capabilities().requires_manual_interval_capture:
+            return "Keine Aktion"
+        return self.waypoint_action.currentText()
+
+    def _update_capture_strategy_ui(self, *_args):
+        """Keep class-specific controls compact and show calculated values, not inputs."""
+        if not hasattr(self, "capture_plan_label"):
+            return
+        capabilities = self._drone_capabilities()
+        consumer = capabilities.requires_manual_interval_capture
+        self._set_photo_option_visible(self.waypoint_action, not consumer)
+        self._set_photo_option_visible(self.photo_distance, False)
+        self._set_route_option_visible(self.path_spacing, False)
+        curve_relevant = not consumer and self._canonical(self.route_mode.currentText()) in {
+            "Stützpunkte für geradere Bahnen", "Overshooting"
+        }
+        self._set_route_option_visible(self.curve_speed, curve_relevant)
+        # For consumer aircraft this is deliberately a preference used to pick
+        # an interval/speed pair, rather than a second competing requirement.
+        speed_label = self.basic_form.labelForField(self.speed)
+        english = self.ui_language == "en"
+        if speed_label is not None:
+            speed_label.setText(
+                ("Preferred mapping speed:" if english else "Bevorzugte Mapping-Geschwindigkeit:")
+                if consumer else ("Speed:" if english else "Geschwindigkeit:")
+            )
+        try:
+            plan = self._capture_plan()
+        except ValueError as error:
+            self.capture_plan_label.setText(str(error))
+            return
+        if consumer:
+            expected_overlap = self.forward_overlap.value()
+            if english:
+                text = (
+                    "<b>Photo Capture Mode:</b> Manual Interval Capture<br>"
+                    f"<b>Set on Controller:</b> {plan.interval_s:g} s<br>"
+                    f"<b>Required Flight Speed:</b> {plan.flight_speed_mps:.2f} m/s<br>"
+                    f"<b>Expected Photo Distance:</b> {plan.actual_distance_m:.2f} m<br>"
+                    f"<b>Expected Forward Overlap:</b> {expected_overlap:.0f} %<br>"
+                    "<b>Important:</b> Start interval shooting manually before the mapping section begins."
+                )
+            else:
+                text = (
+                    "<b>Fotoaufnahmemodus:</b> Manuelle Intervallaufnahme<br>"
+                    f"<b>Am Controller einstellen:</b> {plan.interval_s:g} s<br>"
+                    f"<b>Erforderliche Fluggeschwindigkeit:</b> {plan.flight_speed_mps:.2f} m/s<br>"
+                    f"<b>Erwarteter Bildabstand:</b> {plan.actual_distance_m:.2f} m<br>"
+                    f"<b>Erwartete Vorwärtsüberlappung:</b> {expected_overlap:.0f} %<br>"
+                    "<b>Wichtig:</b> Intervallaufnahme vor dem Mapping-Abschnitt manuell starten."
+                )
+            self.capture_plan_label.setText(text)
+        else:
+            self.capture_plan_label.setText(
+                (f"Automatic WPML distance trigger: capture every {plan.requested_distance_m:.2f} m. "
+                 f"Calculated forward overlap: {self.forward_overlap.value():.0f} %." if english else
+                 f"Automatischer WPML-Distanztrigger: Aufnahme alle {plan.requested_distance_m:.2f} m. "
+                 f"Berechnete Vorwärtsüberlappung: {self.forward_overlap.value():.0f} %.")
+            )
+
+    def _set_photo_option_visible(self, field, visible: bool):
+        field.setVisible(visible)
+        label = self.photo_form.labelForField(field)
+        if label is not None:
+            label.setVisible(visible)
+
     def _set_saved_route_mode(self, value):
         mode = self._canonical(str(value))
         if mode == "Lineare Wegpunkte (derzeit; mit Overshoot)":
@@ -894,6 +1040,15 @@ class MainWindow(QMainWindow):
             if self._canonical(self.route_mode.itemText(index)) == mode:
                 self.route_mode.setCurrentIndex(index)
                 return
+
+    def _set_saved_combo_value(self, field: QComboBox, value) -> bool:
+        """Restore a combo across German/English project and preset files."""
+        canonical = self._canonical(str(value))
+        for index in range(field.count()):
+            if self._canonical(field.itemText(index)) == canonical:
+                field.setCurrentIndex(index)
+                return True
+        return False
 
     def _set_saved_outside_area_mode(self, value):
         mode = self._canonical(str(value))
@@ -912,13 +1067,16 @@ class MainWindow(QMainWindow):
 
     def _preset_values(self) -> dict:
         return {
+            "drone_category": str(self.settings.value("drone_category", "consumer")),
+            "drone_profile": str(self.settings.value("drone_profile", "custom")),
             "altitude": self.altitude.value(), "speed": self.speed.value(), "curve_speed": self.curve_speed.value(),
             "path_spacing": self.path_spacing.value(), "direction": self.direction.value(),
             "direction_mode": self.direction_mode.currentText(),
             "route_mode": self.route_mode.currentText(), "support_spacing": self.support_spacing.value(), "overshoot_distance": self.overshoot_distance.value(),
             "reduced_support_points": self.reduced_support_points, "keep_support_route_inside": self.keep_support_route_inside,
-            "reduced_overshoot_points": self.reduced_overshoot_points,
+            "reduced_overshoot_points": self.reduced_overshoot_points, "flight_path_preview": self.flight_path_preview.isChecked(),
             "side_overlap": self.side_overlap.value(), "forward_overlap": self.forward_overlap.value(),
+            "sensor_format": self.sensor_format.text(), "focal_length": self.focal_length.value(), "image_ratio": self.image_ratio.currentText(),
             "photo_distance": self.photo_distance.value(), "gimbal_pitch": self.gimbal_pitch.value(),
             "waypoint_action": self.waypoint_action.currentText(),
             "max_waypoints": self.max_waypoints.value(), "max_flight_minutes": self.max_flight_minutes.value(),
@@ -953,9 +1111,11 @@ class MainWindow(QMainWindow):
             return
         try:
             values = json.loads((self.preset_dir / f"{name}.json").read_text(encoding="utf-8"))
+            self._apply_saved_drone_selection(values)
             for field, key in [
                 (self.altitude, "altitude"), (self.speed, "speed"), (self.path_spacing, "path_spacing"),
                 (self.side_overlap, "side_overlap"), (self.forward_overlap, "forward_overlap"),
+                (self.focal_length, "focal_length"),
                 (self.photo_distance, "photo_distance"), (self.gimbal_pitch, "gimbal_pitch"),
                 (self.max_waypoints, "max_waypoints"), (self.max_flight_minutes, "max_flight_minutes"),
                 (self.support_spacing, "support_spacing"),
@@ -965,21 +1125,27 @@ class MainWindow(QMainWindow):
                 self.curve_speed.setValue(float(values["curve_speed"]))
             if "overshoot_distance" in values:
                 self.overshoot_distance.setValue(float(values["overshoot_distance"]))
-            self.direction_mode.setCurrentText(values["direction_mode"])
+            if "sensor_format" in values:
+                self.sensor_format.setText(str(values["sensor_format"]))
+            if values.get("image_ratio") in [self.image_ratio.itemText(i) for i in range(self.image_ratio.count())]:
+                self.image_ratio.setCurrentText(values["image_ratio"])
+            self._set_saved_combo_value(self.direction_mode, values["direction_mode"])
             self._set_saved_route_mode(values["route_mode"])
             if self._canonical(values["direction_mode"]) == "Eigene Gradzahl":
                 self.direction.setValue(float(values["direction"]))
             else:
                 self._direction_mode_changed(values["direction_mode"])
-            self.waypoint_action.setCurrentText(values["waypoint_action"])
-            self.split_mode.setCurrentText(values["split_mode"])
-            self.finish_action.setCurrentText(values.get("finish_action", self.finish_action.currentText()))
-            self.signal_loss_action.setCurrentText(values.get("signal_loss_action", self.signal_loss_action.currentText()))
+            self._set_saved_combo_value(self.waypoint_action, values["waypoint_action"])
+            self._set_saved_combo_value(self.split_mode, values["split_mode"])
+            self._set_saved_combo_value(self.finish_action, values.get("finish_action", self.finish_action.currentText()))
+            self._set_saved_combo_value(self.signal_loss_action, values.get("signal_loss_action", self.signal_loss_action.currentText()))
             self._set_saved_outside_area_mode(values.get("outside_area_mode", self.outside_area_mode.currentText()))
             self.no_fly_mode.setCurrentText(values.get("no_fly_mode", self.no_fly_mode.currentText()))
             self.reduced_support_button.setChecked(bool(values.get("reduced_support_points", False)))
             self.keep_support_inside_button.setChecked(bool(values.get("keep_support_route_inside", False)))
             self.reduced_overshoot_button.setChecked(bool(values.get("reduced_overshoot_points", False)))
+            self.flight_path_preview.setChecked(bool(values.get("flight_path_preview", True)))
+            self._update_photogrammetry_geometry()
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             QMessageBox.warning(self, "Preset fehlerhaft", f"Das Preset konnte nicht geladen werden:\n{error}")
             return
@@ -1025,6 +1191,46 @@ class MainWindow(QMainWindow):
         saved_category = str(self.settings.value("drone_category", "consumer"))
         drone_category.setCurrentIndex(1 if saved_category == "prosumer_enterprise" else 0)
         general_form.addRow("Drone category" if english else "Drohnenart", drone_category)
+        drone_profile = QComboBox(general)
+        drone_profile.addItem("Custom (manuelle Kamera)" if not english else "Custom (manual camera)", "custom")
+        for profile in DRONE_PROFILES:
+            drone_profile.addItem(profile.label, profile.key)
+        saved_profile = str(self.settings.value("drone_profile", "custom"))
+        profile_index = drone_profile.findData(saved_profile)
+        drone_profile.setCurrentIndex(profile_index if profile_index >= 0 else 0)
+        general_form.addRow("Drohnenmodell" if not english else "Drone model", drone_profile)
+
+        camera_profile_group = QGroupBox("Kameraprofil für Photogrammetrie" if not english else "Photogrammetry camera profile", general)
+        camera_profile_form = QFormLayout(camera_profile_group)
+        profile_sensor = QLineEdit(self.sensor_format.text(), camera_profile_group)
+        profile_sensor.setPlaceholderText("z. B. 1/1.3, 4/3 oder 9.6 mm")
+        profile_focal = self._number(self.focal_length.value(), 0.1, 200, 0.1, " mm")
+        profile_ratio = QComboBox(camera_profile_group)
+        profile_ratio.addItems(["4:3", "3:2", "16:9"])
+        profile_ratio.setCurrentText(self.image_ratio.currentText())
+        camera_profile_form.addRow("Sensorformat:" if not english else "Sensor format:", profile_sensor)
+        camera_profile_form.addRow("Brennweite (real):" if not english else "Focal length (actual):", profile_focal)
+        camera_profile_form.addRow("Bildformat:" if not english else "Image ratio:", profile_ratio)
+        profile_note = QLabel(
+            "Ein Profil füllt die Werte vor. Sie dürfen für ein Objektiv, einen Crop oder eine abweichende Kamera überschrieben werden."
+            if not english else
+            "A profile pre-fills these values. You can override them for a lens, crop, or different camera."
+        )
+        profile_note.setWordWrap(True)
+        profile_note.setStyleSheet("color:#596780;")
+        camera_profile_form.addRow(profile_note)
+        general_form.addRow(camera_profile_group)
+
+        def apply_drone_profile(profile_key):
+            profile = PROFILE_BY_KEY.get(profile_key)
+            if profile is None:
+                return
+            profile_sensor.setText(profile.sensor_format)
+            profile_focal.setValue(profile.focal_length_mm)
+            profile_ratio.setCurrentText(profile.image_ratio)
+            drone_category.setCurrentIndex(1 if profile.category == "prosumer_enterprise" else 0)
+
+        drone_profile.currentIndexChanged.connect(lambda _index: apply_drone_profile(drone_profile.currentData()))
         general_note = QLabel(
             "This selection is saved as your drone profile and will be used for category-specific settings."
             if english else
@@ -1084,6 +1290,10 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self.settings.setValue("drone_category", drone_category.currentData())
+        self.settings.setValue("drone_profile", drone_profile.currentData())
+        self.sensor_format.setText(profile_sensor.text().strip())
+        self.focal_length.setValue(profile_focal.value())
+        self.image_ratio.setCurrentText(profile_ratio.currentText())
         self.settings.setValue("geozone_opacity", opacity.value())
         self.settings.setValue("local_rules_opacity", local_opacity.value())
         self.settings.setValue("geozone_zone_method", zone_method.currentData())
@@ -1091,6 +1301,7 @@ class MainWindow(QMainWindow):
         self.settings.sync()
         self.geozone_zone_method = zone_method.currentData()
         self._configure_route_modes()
+        self._update_photogrammetry_geometry()
         self.js(f"setGeozoneOpacity({opacity.value()})")
         self.js(f"setLocalRulesOpacity({local_opacity.value()})")
         if self.ui_language != language.currentData():
@@ -1121,6 +1332,13 @@ class MainWindow(QMainWindow):
         self.js(f"setGeozoneOpacity({int(self.settings.value('geozone_opacity', 85))})")
         self.js(f"setLocalRulesOpacity({int(self.settings.value('local_rules_opacity', 35))})")
 
+    def _apply_saved_map_preferences(self):
+        """Apply controls after Leaflet is ready; early signal emissions are lost."""
+        self._apply_saved_map_opacities()
+        self.js("setBase('satellite')" if self._canonical(self.base_layer.currentText()) == "Satellit" else "setBase('normal')")
+        self.js(f"setGeozones({str(self.geozones_toggle.isChecked()).lower()})")
+        self.js(f"setLocalRules({str(self.local_rules_toggle.isChecked()).lower()})")
+
     def _show_local_rules_info(self):
         english = self.ui_language == "en"
         QMessageBox.information(
@@ -1138,15 +1356,12 @@ class MainWindow(QMainWindow):
     def _apply_language(self):
         """Übersetzt alle sichtbaren Standardtexte; interne Routenwerte bleiben kanonisch deutsch."""
         def translate(text: str) -> str:
-            # Die Quelltexte der Oberfläche sind deutsch. Bei deutscher UI
-            # darf keine Rückübersetzung stattfinden ("Export" ist sonst ein
-            # Teilstring von "Exportieren").
-            if self.ui_language != "en":
-                return text
-            replacements = UI_EN.items()
-            for source, target in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
-                text = text.replace(source, target)
-            return text
+            # Widgets keep their currently rendered text, so language changes
+            # must work in both directions. Longest strings first prevents
+            # partial replacements such as "Export" in "Exportieren".
+            replacements = UI_EN if self.ui_language == "en" else UI_DE
+            pattern = "|".join(re.escape(source) for source in sorted(replacements, key=len, reverse=True))
+            return re.sub(pattern, lambda match: replacements[match.group(0)], text) if pattern else text
 
         self.file_menu.setTitle(translate("Datei"))
         self.settings_action.setText(translate("Einstellungen"))
@@ -1168,6 +1383,10 @@ class MainWindow(QMainWindow):
         for tabs in self.findChildren(QTabWidget):
             for index in range(tabs.count()):
                 tabs.setTabText(index, translate(tabs.tabText(index)))
+        # Dynamic labels/tooltips are generated from values, so they are not
+        # covered by static replacement above.
+        if hasattr(self, "capture_plan_label"):
+            self._update_photogrammetry_geometry()
 
     @staticmethod
     def _canonical(value: str) -> str:
@@ -1188,13 +1407,28 @@ class MainWindow(QMainWindow):
             result.append([lat, lon])
         return result
 
+    def _apply_saved_drone_selection(self, values: dict):
+        """Restore the profile selection before route/capture options are rebuilt."""
+        category = str(values.get("drone_category", self.settings.value("drone_category", "consumer")))
+        if category not in {"consumer", "prosumer_enterprise"}:
+            category = "consumer"
+        profile = str(values.get("drone_profile", self.settings.value("drone_profile", "custom")))
+        if profile != "custom" and profile not in PROFILE_BY_KEY:
+            profile = "custom"
+        self.settings.setValue("drone_category", category)
+        self.settings.setValue("drone_profile", profile)
+        self.settings.sync()
+        self._configure_route_modes()
+
     def _apply_project_settings(self, values: dict):
         if not isinstance(values, dict):
             raise ValueError("Die Flugeinstellungen sind ungültig.")
+        self._apply_saved_drone_selection(values)
         number_fields = [
             (self.altitude, "altitude"), (self.speed, "speed"), (self.curve_speed, "curve_speed"), (self.path_spacing, "path_spacing"),
             (self.direction, "direction"), (self.support_spacing, "support_spacing"), (self.overshoot_distance, "overshoot_distance"),
             (self.side_overlap, "side_overlap"), (self.forward_overlap, "forward_overlap"),
+            (self.focal_length, "focal_length"),
             (self.photo_distance, "photo_distance"), (self.gimbal_pitch, "gimbal_pitch"),
             (self.max_waypoints, "max_waypoints"), (self.max_flight_minutes, "max_flight_minutes"),
         ]
@@ -1207,15 +1441,21 @@ class MainWindow(QMainWindow):
             (self.finish_action, "finish_action"), (self.signal_loss_action, "signal_loss_action"),
         ]
         for field, key in combo_fields:
-            if key in values and values[key] in [field.itemText(i) for i in range(field.count())]:
-                field.setCurrentText(values[key])
+            if key in values:
+                self._set_saved_combo_value(field, values[key])
+        if "sensor_format" in values:
+            self.sensor_format.setText(str(values["sensor_format"]))
+        if values.get("image_ratio") in [self.image_ratio.itemText(i) for i in range(self.image_ratio.count())]:
+            self.image_ratio.setCurrentText(values["image_ratio"])
         if "outside_area_mode" in values:
             self._set_saved_outside_area_mode(values["outside_area_mode"])
         self.reduced_support_button.setChecked(bool(values.get("reduced_support_points", False)))
         self.keep_support_inside_button.setChecked(bool(values.get("keep_support_route_inside", False)))
         self.reduced_overshoot_button.setChecked(bool(values.get("reduced_overshoot_points", False)))
+        self.flight_path_preview.setChecked(bool(values.get("flight_path_preview", True)))
         self._direction_mode_changed(self.direction_mode.currentText())
         self._route_mode_changed(self.route_mode.currentText())
+        self._update_photogrammetry_geometry()
 
     def save_project_as(self):
         default_name = "".join(char for char in self.mission_name.text().strip() if char.isalnum() or char in "-_ ") or "ACMP_Projekt"
@@ -1237,6 +1477,8 @@ class MainWindow(QMainWindow):
                 "mission_name": self.mission_name.text(),
                 "thumbnail_title": self.thumbnail_title.text(),
                 "base_layer": self.base_layer.currentText(),
+                "geozones_enabled": self.geozones_toggle.isChecked(),
+                "local_rules_enabled": self.local_rules_toggle.isChecked(),
             },
             "generated_route": self.generated_route,
             "generated_missions": self.generated_missions,
@@ -1257,7 +1499,10 @@ class MainWindow(QMainWindow):
         project = {
             "format": "ACMP project", "version": 1, "active_zone": self.points,
             "no_fly_zones": self.no_fly_zones, "flight_settings": self._preset_values(),
-            "export_settings": {"mission_name": self.mission_name.text(), "thumbnail_title": self.thumbnail_title.text(), "base_layer": self.base_layer.currentText()},
+            "export_settings": {
+                "mission_name": self.mission_name.text(), "thumbnail_title": self.thumbnail_title.text(), "base_layer": self.base_layer.currentText(),
+                "geozones_enabled": self.geozones_toggle.isChecked(), "local_rules_enabled": self.local_rules_toggle.isChecked(),
+            },
             "generated_route": self.generated_route, "generated_missions": self.generated_missions,
             "mission_override": {"force_single_mission": self.force_single_mission},
         }
@@ -1301,6 +1546,10 @@ class MainWindow(QMainWindow):
             self.thumbnail_title.setText(str(export_settings.get("thumbnail_title", self.thumbnail_title.text())))
             if self._canonical(str(export_settings.get("base_layer", ""))) in ("Karte", "Satellit"):
                 self.base_layer.setCurrentText(str(export_settings["base_layer"]))
+            if "geozones_enabled" in export_settings:
+                self.geozones_toggle.setChecked(bool(export_settings["geozones_enabled"]))
+            if "local_rules_enabled" in export_settings:
+                self.local_rules_toggle.setChecked(bool(export_settings["local_rules_enabled"]))
             route = self._project_polygon(project.get("generated_route", []), "Generierte Route")
             missions = [self._project_polygon(mission, f"Teilmission {index}") for index, mission in enumerate(project.get("generated_missions", []), 1)]
             if any(len(mission) < 2 for mission in missions):
@@ -1712,10 +1961,12 @@ class MainWindow(QMainWindow):
             values = json.loads(raw) if isinstance(raw, str) else raw
             if not isinstance(values, dict):
                 return
+            self._apply_saved_drone_selection(values)
             number_fields = [
                 (self.altitude, "altitude"), (self.speed, "speed"), (self.curve_speed, "curve_speed"), (self.path_spacing, "path_spacing"),
                 (self.direction, "direction"), (self.support_spacing, "support_spacing"), (self.overshoot_distance, "overshoot_distance"),
                 (self.side_overlap, "side_overlap"), (self.forward_overlap, "forward_overlap"),
+                (self.focal_length, "focal_length"),
                 (self.photo_distance, "photo_distance"), (self.gimbal_pitch, "gimbal_pitch"),
                 (self.max_waypoints, "max_waypoints"), (self.max_flight_minutes, "max_flight_minutes"),
             ]
@@ -1728,22 +1979,28 @@ class MainWindow(QMainWindow):
                 (self.finish_action, "finish_action"), (self.signal_loss_action, "signal_loss_action"),
                 (self.outside_area_mode, "outside_area_mode"), (self.no_fly_mode, "no_fly_mode"),
             ]:
-                if key in values and values[key] in [field.itemText(index) for index in range(field.count())]:
-                    field.setCurrentText(values[key])
+                if key in values:
+                    self._set_saved_combo_value(field, values[key])
+            if "sensor_format" in values:
+                self.sensor_format.setText(str(values["sensor_format"]))
+            if values.get("image_ratio") in [self.image_ratio.itemText(index) for index in range(self.image_ratio.count())]:
+                self.image_ratio.setCurrentText(values["image_ratio"])
             if "outside_area_mode" in values:
                 self._set_saved_outside_area_mode(values["outside_area_mode"])
             self.reduced_support_button.setChecked(bool(values.get("reduced_support_points", False)))
             self.keep_support_inside_button.setChecked(bool(values.get("keep_support_route_inside", False)))
             self.reduced_overshoot_button.setChecked(bool(values.get("reduced_overshoot_points", False)))
+            self.flight_path_preview.setChecked(bool(values.get("flight_path_preview", True)))
             self._direction_mode_changed(self.direction_mode.currentText())
             self._route_mode_changed(self.route_mode.currentText())
+            self._update_photogrammetry_geometry()
         except (TypeError, ValueError, json.JSONDecodeError):
             return
 
     def _connect_flight_settings_autosave(self):
         number_fields = [
             self.altitude, self.speed, self.curve_speed, self.path_spacing, self.direction, self.support_spacing, self.overshoot_distance,
-            self.side_overlap, self.forward_overlap, self.photo_distance, self.gimbal_pitch,
+            self.side_overlap, self.forward_overlap, self.focal_length, self.photo_distance, self.gimbal_pitch,
             self.max_waypoints, self.max_flight_minutes,
         ]
         combo_fields = [
@@ -1752,8 +2009,17 @@ class MainWindow(QMainWindow):
         ]
         for field in number_fields:
             field.valueChanged.connect(self._save_last_flight_settings)
+        for field in (self.speed, self.photo_distance, self.forward_overlap):
+            field.valueChanged.connect(self._update_capture_strategy_ui)
+        for field in (self.altitude, self.gimbal_pitch, self.side_overlap, self.forward_overlap, self.focal_length):
+            field.valueChanged.connect(self._update_photogrammetry_geometry)
+        self.sensor_format.editingFinished.connect(self._update_photogrammetry_geometry)
+        self.sensor_format.editingFinished.connect(self._save_last_flight_settings)
+        self.image_ratio.currentTextChanged.connect(self._update_photogrammetry_geometry)
+        self.image_ratio.currentTextChanged.connect(self._save_last_flight_settings)
         for field in combo_fields:
             field.currentTextChanged.connect(self._save_last_flight_settings)
+        self.flight_path_preview.toggled.connect(self._save_last_flight_settings)
 
     def _save_last_flight_settings(self, *_args):
         self.settings.setValue("last_flight_settings", json.dumps(self._preset_values(), ensure_ascii=False))
@@ -1952,17 +2218,26 @@ class MainWindow(QMainWindow):
         mode = self._canonical(self.route_mode.currentText())
         use_overshoot = mode == "Overshooting"
         self.overshoot_paths = []
+        self.curve_speed_point_keys = set()
         planning_area = self._inset_support_area() if mode == "Stützpunkte für geradere Bahnen" and self.keep_support_route_inside else self.points
         route = generate_lawnmower_route(
             planning_area, self.path_spacing.value(), self._planning_direction(), zones,
             use_overshoot or self.outside_area_mode.currentText() == "Außerhalb erlaubt",
         )
         if mode == "Stützpunkte für geradere Bahnen":
-            route = densify_route(route, self.support_spacing.value(), self.reduced_support_points)
+            route, curve_indices = densify_route(
+                route, self.support_spacing.value(), self.reduced_support_points, return_curve_speed_indices=True
+            )
+            self.curve_speed_point_keys = {self._point_key(route[index]) for index in curve_indices}
         elif use_overshoot:
             route, self.overshoot_paths = add_overshoot_turns(
                 route, self.overshoot_distance.value(), self.reduced_overshoot_points
             )
+            # waypointSpeed governs travel *from* a waypoint to the next one:
+            # mark only the legs that enter or remain in the exterior U-turn.
+            self.curve_speed_point_keys = {
+                self._point_key(point) for path in self.overshoot_paths for point in path[:-1]
+            }
         return route
 
     def _inset_support_area(self):
@@ -1983,27 +2258,19 @@ class MainWindow(QMainWindow):
             return self.points
         return [[latitude_origin + y / latitude_scale, longitude_origin + x / longitude_scale] for x, y in list(inset.exterior.coords)[:-1]]
 
+    @staticmethod
+    def _point_key(point):
+        return (round(float(point[0]), 9), round(float(point[1]), 9))
+
     def _waypoint_speeds(self, route):
-        """Assign the lower speed before, through and just after tight turns."""
-        normal_speed = self.speed.value()
+        """Use curve speed only on route legs explicitly classified as turns."""
+        normal_speed = self._effective_speed()
         speeds = [normal_speed] * len(route)
         if self._canonical(self.route_mode.currentText()) not in {"Stützpunkte für geradere Bahnen", "Overshooting"}:
             return speeds
-        curve_indices = set()
-        latitude_scale = 111_132.92
-        for index in range(1, len(route) - 1):
-            previous, point, following = route[index - 1:index + 2]
-            longitude_scale = 111_319.49 * math.cos(math.radians(point[0]))
-            incoming = ((point[0] - previous[0]) * latitude_scale, (point[1] - previous[1]) * longitude_scale)
-            outgoing = ((following[0] - point[0]) * latitude_scale, (following[1] - point[1]) * longitude_scale)
-            incoming_length, outgoing_length = math.hypot(*incoming), math.hypot(*outgoing)
-            if not incoming_length or not outgoing_length:
-                continue
-            cosine = (incoming[0] * outgoing[0] + incoming[1] * outgoing[1]) / (incoming_length * outgoing_length)
-            if cosine < math.cos(math.radians(12)):
-                curve_indices.update(range(max(0, index - 1), min(len(route), index + 2)))
-        for index in curve_indices:
-            speeds[index] = min(normal_speed, self.curve_speed.value())
+        for index, point in enumerate(route):
+            if self._point_key(point) in self.curve_speed_point_keys:
+                speeds[index] = min(normal_speed, self.curve_speed.value())
         return speeds
 
     def _overshoot_zone_feature(self):
@@ -2043,7 +2310,7 @@ class MainWindow(QMainWindow):
     def _show_missions(self, missions):
         labels=[]
         for index, mission in enumerate(missions, start=1):
-            seconds=estimated_route_seconds(mission, self.speed.value(), self._turn_delay_seconds())
+            seconds=estimated_route_seconds(mission, self._effective_speed(), self._turn_delay_seconds())
             minutes, remainder=divmod(round(seconds),60)
             labels.append(f"Mission {index} · {len(mission)} WP · ≈ {minutes}:{remainder:02d} min")
         estimated_paths = (
@@ -2073,7 +2340,7 @@ class MainWindow(QMainWindow):
         self.generated_route = route
         self.generated_missions = plan_missions(
             route, int(self.max_waypoints.value()), self.max_flight_minutes.value() * 60,
-            self.speed.value(), self.split_mode.currentText(), self._turn_delay_seconds(),
+            self._effective_speed(), self.split_mode.currentText(), self._turn_delay_seconds(),
         )
         if not self.generated_missions:
             self.js(f"showMission({json.dumps(route)})")
@@ -2084,11 +2351,14 @@ class MainWindow(QMainWindow):
         self._show_missions(self.generated_missions)
         distance = sum(route_length_m(mission) for mission in self.generated_missions)
         turn_delay_s = self._turn_delay_seconds() * sum(count_direction_changes(mission) for mission in self.generated_missions)
-        duration_s = sum(estimated_route_seconds(mission, self.speed.value(), self._turn_delay_seconds()) for mission in self.generated_missions)
+        duration_s = sum(estimated_route_seconds(mission, self._effective_speed(), self._turn_delay_seconds()) for mission in self.generated_missions)
         minutes, seconds = divmod(round(duration_s), 60)
-        action = self._canonical(self.waypoint_action.currentText())
+        action = self._canonical(self._export_photo_mode())
         photo_hint = ""
-        if action == "Foto nach Distanzintervall":
+        if self._drone_capabilities().requires_manual_interval_capture:
+            plan = self._capture_plan()
+            photo_hint = f" · ca. {max(1, round(distance / plan.actual_distance_m))} manuelle Intervall-Auslösungen"
+        elif action == "Foto nach Distanzintervall":
             photo_hint = f" · ca. {max(1, round(distance / self.photo_distance.value()))} Auslösungen"
         elif action == "Foto bei jedem Wegpunkt":
             photo_hint = f" · {len(route)} Auslösungen"
@@ -2103,7 +2373,7 @@ class MainWindow(QMainWindow):
         limit_reasons = []
         if len(route) > int(self.max_waypoints.value()):
             limit_reasons.append(f"{len(route)} Wegpunkte über dem Limit von {int(self.max_waypoints.value())}")
-        if estimated_route_seconds(route, self.speed.value(), self._turn_delay_seconds()) > self.max_flight_minutes.value() * 60:
+        if estimated_route_seconds(route, self._effective_speed(), self._turn_delay_seconds()) > self.max_flight_minutes.value() * 60:
             limit_reasons.append(f"Flugzeit über {int(self.max_flight_minutes.value())} min pro Mission")
         if len(self.generated_missions) > 1:
             self.waypoint_warning.setText(
@@ -2128,7 +2398,7 @@ class MainWindow(QMainWindow):
         self.force_single_mission = True
         self.generated_missions = [self.generated_route]
         self._show_missions(self.generated_missions)
-        duration_s = estimated_route_seconds(self.generated_route, self.speed.value(), self._turn_delay_seconds())
+        duration_s = estimated_route_seconds(self.generated_route, self._effective_speed(), self._turn_delay_seconds())
         minutes, seconds = divmod(round(duration_s), 60)
         self.mission_summary.setText(
             f"{len(self.generated_route)} Wegpunkte · 1 erzwungene Mission · ≈ {minutes}:{seconds:02d} min"
@@ -2153,7 +2423,7 @@ class MainWindow(QMainWindow):
         else:
             self.generated_missions = plan_missions(
                 self.generated_route, int(self.max_waypoints.value()), self.max_flight_minutes.value() * 60,
-                self.speed.value(), self.split_mode.currentText(), self._turn_delay_seconds(),
+                self._effective_speed(), self.split_mode.currentText(), self._turn_delay_seconds(),
             )
         if not self.generated_missions:
             QMessageBox.warning(self, "Export nicht möglich", "Die Route kann unter den aktuellen Wegpunkt- und Flugzeitgrenzen nicht aufgeteilt werden.")
@@ -2173,8 +2443,8 @@ class MainWindow(QMainWindow):
             "Landen": "landing",
         }
         build_dji_kmz(
-            destination, route, self.altitude.value(), self.speed.value(), self.gimbal_pitch.value(),
-            self.waypoint_action.currentText(), self.photo_distance.value(), self.route_mode.currentText(),
+            destination, route, self.altitude.value(), self._effective_speed(), self.gimbal_pitch.value(),
+            self._export_photo_mode(), self.photo_distance.value(), self.route_mode.currentText(),
             finish_actions[self._canonical(self.finish_action.currentText())], signal_loss_actions[self._canonical(self.signal_loss_action.currentText())],
             self._waypoint_speeds(route),
         )

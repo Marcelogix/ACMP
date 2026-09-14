@@ -168,7 +168,7 @@ def generate_lawnmower_route(points,spacing_m,direction_deg,no_fly_zones=None,al
     safe=[out[0]] if out else []
     for point in out[1:]: safe.extend(detour(safe[-1],point))
     return safe
-def densify_route(route, support_distance_m, reduced=False):
+def densify_route(route, support_distance_m, reduced=False, return_curve_speed_indices=False):
     """Add one support waypoint before and after each genuine route turn.
 
     Unlike ordinary densification, straight survey passes stay untouched.  The
@@ -176,7 +176,8 @@ def densify_route(route, support_distance_m, reduced=False):
     smoothing controllers begin and finish the turn nearer its intended place.
     """
     if len(route) < 3 or support_distance_m <= 0:
-        return [point[:] for point in route]
+        result=[point[:] for point in route]
+        return (result, set()) if return_curve_speed_indices else result
     latitude_scale = 111_132.92
 
     def vector(start, end):
@@ -190,6 +191,7 @@ def densify_route(route, support_distance_m, reduced=False):
         ]
 
     result = [route[0][:]]
+    curve_speed_indices = set()
     index = 1
     while index < len(route) - 1:
         previous, turn, following = route[index - 1:index + 2]
@@ -213,6 +215,7 @@ def densify_route(route, support_distance_m, reduced=False):
             if next_incoming_length and next_outgoing_length:
                 reverse_cosine = (incoming[0] * next_outgoing[0] + incoming[1] * next_outgoing[1]) / (incoming_length * next_outgoing_length)
                 if is_turn and reverse_cosine < -0.7:
+                    first_curve_index = len(result) - 1
                     before_distance = min(support_distance_m, incoming_length * 0.45)
                     after_distance = min(support_distance_m, next_outgoing_length * 0.45)
                     result.extend([
@@ -220,19 +223,25 @@ def densify_route(route, support_distance_m, reduced=False):
                         interpolate(turn, next_turn, 0.5), next_turn[:],
                         interpolate(next_turn, after_next, after_distance / next_outgoing_length),
                     ])
+                    # Slow from the last straight-leg waypoint through the
+                    # second corner. The final outgoing support point resumes
+                    # normal speed for the next scan leg.
+                    curve_speed_indices.update(range(first_curve_index, first_curve_index + 5))
                     index += 2
                     continue
         if is_turn:
+            first_curve_index = len(result) - 1
             before_distance = min(support_distance_m, incoming_length * 0.45)
             after_distance = min(support_distance_m, outgoing_length * 0.45)
             result.append(interpolate(previous, turn, 1 - before_distance / incoming_length))
             result.append(turn[:])
             result.append(interpolate(turn, following, after_distance / outgoing_length))
+            curve_speed_indices.update(range(first_curve_index, first_curve_index + 3))
         else:
             result.append(turn[:])
         index += 1
     result.append(route[-1][:])
-    return result
+    return (result, curve_speed_indices) if return_curve_speed_indices else result
 
 def add_overshoot_turns(route, overshoot_distance_m, reduced=False):
     """Move lawnmower U-turns outside the survey area with two extra points.
