@@ -11,11 +11,11 @@ ACMP is a desktop tool for drawing mapping areas on an interactive map, planning
 
 ## Key Features
 
-- Create flight areas as polygons, rectangles, or circles.
+- Create and manage multiple flight areas as polygons, rectangles, or circles.
 - Add multiple no-fly zones inside a mapping area.
 - Configure essential flight settings such as altitude, speed, path spacing, and route direction.
 - Set mission limits for maximum waypoints and flight duration.
-- Automatically split large routes into multiple missions when limits are exceeded.
+- Automatically split large routes into multiple missions when limits are exceeded; separate flight areas always remain separate missions.
 - Consumer profiles convert the desired photo spacing into a feasible controller interval and matching mapping speed; interval shooting is started manually on the controller.
 - Prosumer/Enterprise profiles retain the WPML distance-trigger export for compatible mapping missions.
 - Show official **Germany-only** UAS geozones and inspect affected areas before route planning.
@@ -34,7 +34,7 @@ The map and address search require an internet connection.
 ## Usage
 
 1. In **Plan Flight Area**, search for an address or use your current location.
-2. Draw the flight area as a polygon, rectangle, or circle.
+2. Draw one or more flight areas as polygons, rectangles, or circles. Rename or delete an area from its list as needed.
 3. Add red no-fly zones where the drone must not fly.
 4. Optionally enable **Germany-only** UAS geozones or local-rule hints, then use the map inspection buttons to identify areas at a point.
 5. In **Flight Settings**, choose altitude, speed, path spacing, direction, camera action, and mission limits. Settings are restored automatically on the next start.

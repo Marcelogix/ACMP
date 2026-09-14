@@ -19,7 +19,7 @@ from urllib.parse import urlencode
 from urllib.request import urlopen
 
 from PySide6.QtCore import QSettings, QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEnginePermission
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
@@ -168,23 +168,26 @@ const localRules = L.tileLayer.wms('https://geodienste.bfn.de/ogc/wms/schutzgebi
 });
 L.control.layers({'Karte':normal, 'Satellit':satellite}, null, {position:'topleft'}).addTo(map);
 L.control.scale({position:'bottomleft', metric:true, imperial:false, maxWidth:140}).addTo(map);
-let points = [], polygon = null, preview = null, shapePreview = null, shapeStart = null, markers = [], drawMode = 'none';
+let flightAreas = [], activeFlight = [], selectedFlight = -1, flightAreaLayer = L.layerGroup().addTo(map);
+let preview = null, shapePreview = null, shapeStart = null, drawMode = 'none';
 let noFlyZones = [], activeNoFly = [], selectedNoFly = -1, noFlyLayer = L.layerGroup().addTo(map);
 let missionLayer = L.layerGroup().addTo(map);
 let overshootZoneLayer = L.layerGroup().addTo(map);
 let geozoneConflictLayer = L.layerGroup().addTo(map);
-function emit(){ console.log('ACMP_POLYGON:' + JSON.stringify(points)); }
+function emitFlightAreas(){ console.log('ACMP_FLIGHT_AREAS:' + JSON.stringify(flightAreas)); }
 function emitNoFly(){ console.log('ACMP_NO_FLY:' + JSON.stringify(noFlyZones)); }
-function clearVisuals(){
-  if(polygon) map.removeLayer(polygon); if(preview) map.removeLayer(preview);
-  markers.forEach(m=>map.removeLayer(m)); polygon=null; preview=null; markers=[];
-}
-function redraw(silent=false){
-  clearVisuals();
-  points.forEach((p,i)=>{ markers.push(L.circleMarker(p,{radius:6,color:'#1064b8',fillColor:'#fff',fillOpacity:1,weight:3}).bindTooltip(String(i+1),{permanent:true,direction:'top',offset:[0,-8]}).addTo(map)); });
-  if(points.length >= 3) polygon=L.polygon(points,{color:'#0878d1',weight:3,fillColor:'#39a9ff',fillOpacity:.20}).addTo(map);
-  else if(points.length === 2) polygon=L.polyline(points,{color:'#0878d1',weight:3}).addTo(map);
-  if(!silent) emit();
+function redrawFlightAreas(silent=false){
+  flightAreaLayer.clearLayers();
+  flightAreas.forEach((area,index)=>{
+    const selected=index===selectedFlight;
+    L.polygon(area, selected
+      ? {color:'#ff8c00',weight:5,fillColor:'#ffb000',fillOpacity:.34,dashArray:'9 5'}
+      : {color:'#0878d1',weight:3,fillColor:'#39a9ff',fillOpacity:.20}
+    ).bindTooltip(`Flugbereich ${index+1}`,{sticky:true}).addTo(flightAreaLayer);
+  });
+  if(activeFlight.length >= 3) L.polygon(activeFlight,{color:'#0878d1',weight:3,dashArray:'7 6',fillColor:'#39a9ff',fillOpacity:.16}).addTo(flightAreaLayer);
+  else if(activeFlight.length) L.polyline(activeFlight,{color:'#0878d1',weight:3,dashArray:'7 6'}).addTo(flightAreaLayer);
+  if(!silent) emitFlightAreas();
 }
 function redrawNoFly(){
   noFlyLayer.clearLayers();
@@ -199,68 +202,77 @@ function redrawNoFly(){
   else if(activeNoFly.length) L.polyline(activeNoFly,{color:'#c92525',weight:3,dashArray:'7 6'}).addTo(noFlyLayer);
 }
 map.on('click', e=>{
-  if(drawMode==='area'){ points.push([e.latlng.lat,e.latlng.lng]); redraw(); }
+  if(drawMode==='area'){ activeFlight.push([e.latlng.lat,e.latlng.lng]); redrawFlightAreas(); }
   if(drawMode==='nofly'){ activeNoFly.push([e.latlng.lat,e.latlng.lng]); redrawNoFly(); }
   if(drawMode==='inspect'){ drawMode='none'; map.getContainer().style.cursor=''; console.log('ACMP_INSPECT:' + JSON.stringify([e.latlng.lat,e.latlng.lng])); }
   if(drawMode==='localinspect'){ drawMode='none'; map.getContainer().style.cursor=''; console.log('ACMP_LOCAL_INSPECT:' + JSON.stringify([e.latlng.lat,e.latlng.lng])); }
 });
 map.on('contextmenu', e=>{ L.DomEvent.preventDefault(e.originalEvent); });
 map.on('mousedown', e=>{
-  if(drawMode==='rectangle' || drawMode==='circle'){
+  if(['rectangle','circle','noflyrectangle','noflycircle'].includes(drawMode)){
     shapeStart=e.latlng; map.dragging.disable();
     if(shapePreview) map.removeLayer(shapePreview);
   }
 });
 map.on('mousemove', e=>{
-  if((drawMode==='rectangle' || drawMode==='circle') && shapeStart){
+  if(['rectangle','circle','noflyrectangle','noflycircle'].includes(drawMode) && shapeStart){
     if(shapePreview) map.removeLayer(shapePreview);
-    shapePreview=drawMode==='rectangle'
-      ? L.rectangle(L.latLngBounds(shapeStart,e.latlng),{color:'#0878d1',weight:3,fillOpacity:.16,dashArray:'6 6'}).addTo(map)
-      : L.circle(shapeStart,{radius:map.distance(shapeStart,e.latlng),color:'#0878d1',weight:3,fillOpacity:.16,dashArray:'6 6'}).addTo(map);
+    const nofly=drawMode.startsWith('nofly'), color=nofly?'#c92525':'#0878d1';
+    shapePreview=drawMode.endsWith('rectangle')
+      ? L.rectangle(L.latLngBounds(shapeStart,e.latlng),{color:color,weight:3,fillOpacity:.16,dashArray:'6 6'}).addTo(map)
+      : L.circle(shapeStart,{radius:map.distance(shapeStart,e.latlng),color:color,weight:3,fillOpacity:.16,dashArray:'6 6'}).addTo(map);
     return;
   }
-  const active=drawMode==='area' ? points : activeNoFly;
+  const active=drawMode==='area' ? activeFlight : activeNoFly;
   if(drawMode==='none' || !active.length) return;
   if(preview) map.removeLayer(preview);
   const color=drawMode==='nofly' ? '#c92525' : '#0878d1';
   preview=L.polyline([...active,[e.latlng.lat,e.latlng.lng]],{color:color,dashArray:'6 7',weight:2}).addTo(map);
 });
 map.on('mouseup', e=>{
-  if(!shapeStart || (drawMode!=='rectangle' && drawMode!=='circle')) return;
+  if(!shapeStart || !['rectangle','circle','noflyrectangle','noflycircle'].includes(drawMode)) return;
   const start=shapeStart, kind=drawMode; shapeStart=null; map.dragging.enable();
   if(shapePreview){map.removeLayer(shapePreview);shapePreview=null;}
-  if(kind==='rectangle'){
+  const nofly=kind.startsWith('nofly');
+  let shape;
+  if(kind.endsWith('rectangle')){
     const bounds=L.latLngBounds(start,e.latlng), sw=bounds.getSouthWest(), ne=bounds.getNorthEast();
-    points=[[sw.lat,sw.lng],[sw.lat,ne.lng],[ne.lat,ne.lng],[ne.lat,sw.lng]];
+    shape=[[sw.lat,sw.lng],[sw.lat,ne.lng],[ne.lat,ne.lng],[ne.lat,sw.lng]];
   } else {
     const radius=map.distance(start,e.latlng), count=64;
-    points=Array.from({length:count},(_,i)=>{
+    shape=Array.from({length:count},(_,i)=>{
       const radians=2*Math.PI*i/count;
       return [start.lat+(radius*Math.cos(radians))/111132.92, start.lng+(radius*Math.sin(radians))/(111319.49*Math.cos(start.lat*Math.PI/180))];
     });
   }
-  drawMode='none'; redraw(); console.log('ACMP_SHAPE_DONE');
+  drawMode='none';
+  if(nofly){ noFlyZones.push(shape); selectedNoFly=noFlyZones.length-1; redrawNoFly(); emitNoFly(); }
+  else { activeFlight=shape; finishFlightArea(); console.log('ACMP_SHAPE_DONE'); }
 });
 function endPreview(){ if(preview){map.removeLayer(preview);preview=null;} }
-function setDrawing(value){ drawMode=value?'area':'none'; map.getContainer().style.cursor=value?'crosshair':''; endPreview(); }
+function setDrawing(value){ drawMode=value?'area':'none'; map.getContainer().style.cursor=value?'crosshair':''; endPreview(); if(!value) finishFlightArea(); }
 function setShapeDrawing(kind){ drawMode=kind; map.getContainer().style.cursor='crosshair'; endPreview(); }
 function setNoFlyDrawing(value){ drawMode=value?'nofly':'none'; map.getContainer().style.cursor=value?'crosshair':''; endPreview(); if(!value) finishNoFly(); }
 function setInspect(value){ drawMode=value?'inspect':'none'; map.getContainer().style.cursor=value?'crosshair':''; endPreview(); }
 function setLocalInspect(value){ drawMode=value?'localinspect':'none'; map.getContainer().style.cursor=value?'crosshair':''; endPreview(); }
 function finishNoFly(){ if(activeNoFly.length >= 3){noFlyZones.push(activeNoFly);emitNoFly();} activeNoFly=[];redrawNoFly(); }
+function finishFlightArea(){ if(activeFlight.length >= 3){flightAreas.push(activeFlight);selectedFlight=flightAreas.length-1;emitFlightAreas();} activeFlight=[];redrawFlightAreas(); }
+function cancelFlightArea(){ activeFlight=[];redrawFlightAreas(); }
+function deleteFlightArea(index){ if(index>=0 && index<flightAreas.length){flightAreas.splice(index,1);selectedFlight=-1;redrawFlightAreas();emitFlightAreas();} }
+function selectFlightArea(index){ selectedFlight=index; redrawFlightAreas(true); }
 function cancelNoFly(){ activeNoFly=[];redrawNoFly(); }
 function deleteNoFly(index){ if(index>=0 && index<noFlyZones.length){noFlyZones.splice(index,1);redrawNoFly();emitNoFly();} }
 function selectNoFly(index){ selectedNoFly=index; redrawNoFly(); }
 function clearNoFly(){ noFlyZones=[];activeNoFly=[];redrawNoFly();emitNoFly(); }
-function clearAll(){ points=[]; noFlyZones=[]; activeNoFly=[]; redraw(); redrawNoFly(); emitNoFly(); }
-function setProjectGeometry(newPoints,newZones){
-  points=Array.isArray(newPoints)?newPoints:[];
+function clearAll(){ flightAreas=[]; activeFlight=[]; noFlyZones=[]; activeNoFly=[]; redrawFlightAreas(); redrawNoFly(); emitNoFly(); }
+function setProjectGeometry(newAreas,newZones){
+  flightAreas=Array.isArray(newAreas)?newAreas:[];
   noFlyZones=Array.isArray(newZones)?newZones:[];
-  activeNoFly=[]; selectedNoFly=-1; redraw(true); redrawNoFly();
+  activeFlight=[]; activeNoFly=[]; selectedFlight=-1; selectedNoFly=-1; redrawFlightAreas(true); redrawNoFly();
 }
-function undo(){ if(points.length){points.pop();redraw();} }
-function clearPolygon(){ points=[]; redraw(); }
-function zoomToArea(){ const layers=[]; if(points.length) layers.push(L.polygon(points)); noFlyZones.forEach(z=>layers.push(L.polygon(z))); if(layers.length) map.fitBounds(L.featureGroup(layers).getBounds().pad(.12)); }
+function undo(){ if(activeFlight.length){activeFlight.pop();redrawFlightAreas();} }
+function clearPolygon(){ flightAreas=[]; activeFlight=[]; redrawFlightAreas(); }
+function zoomToArea(){ const layers=[]; flightAreas.forEach(a=>layers.push(L.polygon(a))); noFlyZones.forEach(z=>layers.push(L.polygon(z))); if(layers.length) map.fitBounds(L.featureGroup(layers).getBounds().pad(.12)); }
 function setBase(name){ if(name==='satellite'){map.removeLayer(normal);satellite.addTo(map);}else{map.removeLayer(satellite);normal.addTo(map);} }
 function setGeozones(value){ if(value){geozones.addTo(map);}else{map.removeLayer(geozones);} }
 function setGeozoneOpacity(value){ geozones.setOpacity(value/100); }
@@ -317,13 +329,19 @@ function showMissions(missions, summaries=[], estimatedPaths=[], overshootPaths=
 
 class MapPage(QWebEnginePage):
     polygon_changed = Signal(list)
+    flight_areas_changed = Signal(list)
     no_fly_changed = Signal(list)
     shape_completed = Signal()
     inspection_requested = Signal(list)
     local_inspection_requested = Signal(list)
 
     def javaScriptConsoleMessage(self, level, message, line_number, source_id):
-        if message.startswith("ACMP_POLYGON:"):
+        if message.startswith("ACMP_FLIGHT_AREAS:"):
+            try:
+                self.flight_areas_changed.emit(json.loads(message.removeprefix("ACMP_FLIGHT_AREAS:")))
+            except json.JSONDecodeError:
+                pass
+        elif message.startswith("ACMP_POLYGON:"):
             try:
                 self.polygon_changed.emit(json.loads(message.removeprefix("ACMP_POLYGON:")))
             except json.JSONDecodeError:
@@ -372,6 +390,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.points: list[list[float]] = []
+        self.flight_areas: list[list[list[float]]] = []
+        self.flight_area_names: list[str] = []
         self.no_fly_zones: list[list[list[float]]] = []
         self.no_fly_names: list[str] = []
         self.current_project_path: Path | None = None
@@ -437,6 +457,7 @@ class MainWindow(QMainWindow):
 
         self.page = MapPage(self)
         self.page.polygon_changed.connect(self._polygon_changed)
+        self.page.flight_areas_changed.connect(self._flight_areas_changed)
         self.page.no_fly_changed.connect(self._no_fly_changed)
         self.page.shape_completed.connect(self._shape_completed)
         self.page.inspection_requested.connect(self._inspect_map_point)
@@ -572,15 +593,39 @@ class MainWindow(QMainWindow):
         undo_button = QPushButton("Letzten Punkt rückgängig")
         undo_button.clicked.connect(lambda: self.js("undo()"))
         flight_area_layout.addWidget(undo_button)
+        cancel_flight_area = QPushButton("Aktuellen Flugbereich verwerfen")
+        cancel_flight_area.clicked.connect(lambda: self.js("cancelFlightArea()"))
+        flight_area_layout.addWidget(cancel_flight_area)
+        self.flight_area_list = QListWidget()
+        self.flight_area_list.setMinimumHeight(95)
+        self.flight_area_list.currentRowChanged.connect(self.select_flight_area)
+        self.flight_area_list.itemDoubleClicked.connect(self.rename_flight_area)
+        flight_area_layout.addWidget(self.flight_area_list)
+        clear_flight_selection = QPushButton("Auswahl aufheben")
+        clear_flight_selection.clicked.connect(self.clear_flight_area_selection)
+        flight_area_layout.addWidget(clear_flight_selection)
+        delete_flight_area = QPushButton("Ausgewählten Flugbereich löschen")
+        delete_flight_area.clicked.connect(self.delete_selected_flight_area)
+        flight_area_layout.addWidget(delete_flight_area)
+        clear_flight_areas = QPushButton("Alle Flugbereiche löschen")
+        clear_flight_areas.clicked.connect(lambda: self.js("clearPolygon()"))
+        flight_area_layout.addWidget(clear_flight_areas)
         capture_layout.addWidget(flight_area_group)
 
         no_fly_group = QGroupBox("Sperrgebiete")
         no_fly_layout = QVBoxLayout(no_fly_group)
-        self.no_fly_button = QPushButton("Sperrgebiet zeichnen")
+        self.no_fly_button = QPushButton("Polygon")
         self.no_fly_button.setCheckable(True)
-        self.no_fly_button.setStyleSheet("QPushButton { background:#c92525; color:white; font-weight:600; } QPushButton:checked { background:#8e1515; }")
         self.no_fly_button.toggled.connect(self.set_no_fly_drawing)
-        no_fly_layout.addWidget(self.no_fly_button)
+        self.no_fly_rectangle_button = QPushButton("Rechteck")
+        self.no_fly_rectangle_button.clicked.connect(lambda: self.start_no_fly_shape("noflyrectangle"))
+        self.no_fly_circle_button = QPushButton("Kreis")
+        self.no_fly_circle_button.clicked.connect(lambda: self.start_no_fly_shape("noflycircle"))
+        no_fly_shape_row = QHBoxLayout()
+        no_fly_shape_row.addWidget(self.no_fly_button)
+        no_fly_shape_row.addWidget(self.no_fly_rectangle_button)
+        no_fly_shape_row.addWidget(self.no_fly_circle_button)
+        no_fly_layout.addLayout(no_fly_shape_row)
         cancel_no_fly = QPushButton("Aktuelles Sperrgebiet verwerfen")
         cancel_no_fly.clicked.connect(lambda: self.js("cancelNoFly()"))
         no_fly_layout.addWidget(cancel_no_fly)
@@ -592,8 +637,8 @@ class MainWindow(QMainWindow):
         delete_zone = QPushButton("Ausgewähltes Sperrgebiet löschen")
         delete_zone.clicked.connect(self.delete_selected_no_fly)
         no_fly_layout.addWidget(delete_zone)
-        clear_button = QPushButton("Alles löschen")
-        clear_button.clicked.connect(lambda: self.js("clearAll()"))
+        clear_button = QPushButton("Alle Sperrgebiete löschen")
+        clear_button.clicked.connect(lambda: self.js("clearNoFly()"))
         no_fly_layout.addWidget(clear_button)
         capture_layout.addWidget(no_fly_group)
 
@@ -992,6 +1037,12 @@ class MainWindow(QMainWindow):
                 ("Preferred mapping speed:" if english else "Bevorzugte Mapping-Geschwindigkeit:")
                 if consumer else ("Speed:" if english else "Geschwindigkeit:")
             )
+        gimbal_label = self.photo_form.labelForField(self.gimbal_pitch)
+        if gimbal_label is not None:
+            gimbal_label.setText(
+                ("Gimbal pitch:" if english else "Kamera-Neigung:") if capabilities.supports_wpml_gimbal_pitch else
+                ("Gimbal pitch (set manually on controller):" if english else "Kamera-Neigung (manuell am Controller einstellen):")
+            )
         try:
             plan = self._capture_plan()
         except ValueError as error:
@@ -1006,7 +1057,7 @@ class MainWindow(QMainWindow):
                     f"<b>Required Flight Speed:</b> {plan.flight_speed_mps:.2f} m/s<br>"
                     f"<b>Expected Photo Distance:</b> {plan.actual_distance_m:.2f} m<br>"
                     f"<b>Expected Forward Overlap:</b> {expected_overlap:.0f} %<br>"
-                    "<b>Important:</b> Start interval shooting manually before the mapping section begins."
+                    "<b>Important:</b> Start interval shooting and set the gimbal pitch manually before the mapping section begins."
                 )
             else:
                 text = (
@@ -1015,7 +1066,7 @@ class MainWindow(QMainWindow):
                     f"<b>Erforderliche Fluggeschwindigkeit:</b> {plan.flight_speed_mps:.2f} m/s<br>"
                     f"<b>Erwarteter Bildabstand:</b> {plan.actual_distance_m:.2f} m<br>"
                     f"<b>Erwartete Vorwärtsüberlappung:</b> {expected_overlap:.0f} %<br>"
-                    "<b>Wichtig:</b> Intervallaufnahme vor dem Mapping-Abschnitt manuell starten."
+                    "<b>Wichtig:</b> Intervallaufnahme und Kamera-Neigung vor dem Mapping-Abschnitt manuell am Controller einstellen."
                 )
             self.capture_plan_label.setText(text)
         else:
@@ -1360,6 +1411,12 @@ class MainWindow(QMainWindow):
             # must work in both directions. Longest strings first prevents
             # partial replacements such as "Export" in "Exportieren".
             replacements = UI_EN if self.ui_language == "en" else UI_DE
+            # Do not translate a label that is already in the requested
+            # language.  In particular, reverse translation must not replace
+            # the English source word "Export" inside the German target word
+            # "Exportieren".
+            if text in replacements.values():
+                return text
             pattern = "|".join(re.escape(source) for source in sorted(replacements, key=len, reverse=True))
             return re.sub(pattern, lambda match: replacements[match.group(0)], text) if pattern else text
 
@@ -1469,8 +1526,10 @@ class MainWindow(QMainWindow):
             destination = destination.with_suffix(".acmp.json")
         project = {
             "format": "ACMP project",
-            "version": 1,
+            "version": 2,
             "active_zone": self.points,
+            "flight_areas": self.flight_areas,
+            "flight_area_names": self.flight_area_names,
             "no_fly_zones": self.no_fly_zones,
             "flight_settings": self._preset_values(),
             "export_settings": {
@@ -1497,7 +1556,8 @@ class MainWindow(QMainWindow):
             self.save_project_as()
             return
         project = {
-            "format": "ACMP project", "version": 1, "active_zone": self.points,
+            "format": "ACMP project", "version": 2, "active_zone": self.points,
+            "flight_areas": self.flight_areas, "flight_area_names": self.flight_area_names,
             "no_fly_zones": self.no_fly_zones, "flight_settings": self._preset_values(),
             "export_settings": {
                 "mission_name": self.mission_name.text(), "thumbnail_title": self.thumbnail_title.text(), "base_layer": self.base_layer.currentText(),
@@ -1514,7 +1574,7 @@ class MainWindow(QMainWindow):
 
     def new_project(self):
         self.current_project_path = None
-        self.points, self.no_fly_zones, self.no_fly_names = [], [], []
+        self.points, self.flight_areas, self.flight_area_names, self.no_fly_zones, self.no_fly_names = [], [], [], [], []
         self.generated_route, self.generated_missions = [], []
         self.mission_name.setText("ACMP_Mapping_Mission")
         self.thumbnail_title.clear()
@@ -1532,10 +1592,17 @@ class MainWindow(QMainWindow):
             project = json.loads(Path(filename).read_text(encoding="utf-8"))
             if not isinstance(project, dict) or project.get("format") != "ACMP project":
                 raise ValueError("Die Datei ist kein ACMP-Projekt.")
-            points = self._project_polygon(project.get("active_zone", []), "Aktive Zone")
+            stored_areas = project.get("flight_areas")
+            areas = (
+                [self._project_polygon(area, f"Flugbereich {index}") for index, area in enumerate(stored_areas, 1)]
+                if isinstance(stored_areas, list)
+                else [self._project_polygon(project.get("active_zone", []), "Aktive Zone")]
+            )
+            if areas == [[]]:  # Empty legacy projects did not have flight_areas.
+                areas = []
             zones = [self._project_polygon(zone, f"Sperrgebiet {index}") for index, zone in enumerate(project.get("no_fly_zones", []), 1)]
-            if len(points) not in (0,) and len(points) < 3:
-                raise ValueError("Die aktive Zone benötigt mindestens drei Punkte.")
+            if any(len(area) < 3 for area in areas):
+                raise ValueError("Jeder Flugbereich benötigt mindestens drei Punkte.")
             if any(len(zone) < 3 for zone in zones):
                 raise ValueError("Jedes Sperrgebiet benötigt mindestens drei Punkte.")
             self._apply_project_settings(project.get("flight_settings", {}))
@@ -1562,13 +1629,16 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Öffnen fehlgeschlagen", f"Das Projekt konnte nicht geöffnet werden.\n\n{error}")
             return
 
-        self.points, self.no_fly_zones = points, zones
+        self.flight_areas, self.no_fly_zones = areas, zones
+        self.flight_area_names = [str(name) for name in project.get("flight_area_names", [])]
+        self.flight_area_names = (self.flight_area_names + [f"Flugbereich {index}" for index in range(len(self.flight_area_names) + 1, len(areas) + 1)])[:len(areas)]
+        self.points = areas[0] if areas else []
         self.current_project_path = Path(filename)
         self.generated_route, self.generated_missions = route, missions
         self.force_single_mission = force_single_mission
         self._refresh_geometry_ui()
         self.force_one_button.setVisible(len(missions) > 1 and not force_single_mission)
-        self.js(f"setProjectGeometry({json.dumps(points)}, {json.dumps(zones)});")
+        self.js(f"setProjectGeometry({json.dumps(areas)}, {json.dumps(zones)});")
         if missions:
             self._show_missions(missions)
         else:
@@ -1600,7 +1670,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(100, self._queue_geozone_check)
 
     def set_no_fly_drawing(self, active: bool):
-        self.no_fly_button.setText("Sperrgebiet abschließen" if active else "Sperrgebiet zeichnen")
+        self.no_fly_button.setText("Fertig" if active else "Polygon")
         if active and self.draw_button.isChecked():
             self.draw_button.setChecked(False)
         if active and self.inspect_button.isChecked():
@@ -1642,6 +1712,19 @@ class MainWindow(QMainWindow):
             self.local_rules_inspect_button.setChecked(False)
         label = "Rechteck" if shape == "rectangle" else "Kreis"
         self.statusBar().showMessage(f"{label}: Auf der Karte klicken, gedrückt halten und aufziehen.", 5000)
+        self.js(f"setShapeDrawing('{shape}')")
+
+    def start_no_fly_shape(self, shape: str):
+        if self.draw_button.isChecked():
+            self.draw_button.setChecked(False)
+        if self.no_fly_button.isChecked():
+            self.no_fly_button.setChecked(False)
+        if self.inspect_button.isChecked():
+            self.inspect_button.setChecked(False)
+        if self.local_rules_inspect_button.isChecked():
+            self.local_rules_inspect_button.setChecked(False)
+        label = "Rechteck" if shape == "noflyrectangle" else "Kreis"
+        self.statusBar().showMessage(f"Sperrgebiet als {label.lower()}: Auf der Karte klicken, gedrückt halten und aufziehen.", 5000)
         self.js(f"setShapeDrawing('{shape}')")
 
     def _shape_completed(self):
@@ -2129,11 +2212,24 @@ class MainWindow(QMainWindow):
         self.no_fly_zones = json.loads(json.dumps(base_zones)) + additions
         self.no_fly_names = list(base_names) + names
         self._no_fly_changed(self.no_fly_zones)
-        self.js(f"setProjectGeometry({json.dumps(self.points)}, {json.dumps(self.no_fly_zones)});")
+        self.js(f"setProjectGeometry({json.dumps(self.flight_areas)}, {json.dumps(self.no_fly_zones)});")
         self.js(f"showGeozoneConflicts({json.dumps(visible_features)});")
 
     def _polygon_changed(self, points: list):
-        self.points = points
+        # Compatibility with maps embedded by older project versions.
+        self._flight_areas_changed([points] if points else [])
+
+    def _flight_areas_changed(self, areas: list):
+        names_by_geometry = {
+            json.dumps(area, separators=(",", ":")): name
+            for area, name in zip(self.flight_areas, self.flight_area_names)
+        }
+        self.flight_areas = areas
+        self.flight_area_names = [
+            names_by_geometry.get(json.dumps(area, separators=(",", ":")), f"Flugbereich {index}")
+            for index, area in enumerate(areas, 1)
+        ]
+        self.points = self.flight_areas[0] if self.flight_areas else []
         if self._geozone_review_dialog and self._geozone_review_dialog.isVisible():
             self._geozone_review_dialog.close()
         self._last_geozone_features = []
@@ -2154,20 +2250,24 @@ class MainWindow(QMainWindow):
     def _refresh_geometry_ui(self):
         """Aktualisiert die Gebietsinformationen ohne die aktuelle Route zu verwerfen."""
         points = self.points
-        self.count_label.setText(f"Punkte: {len(points)}")
-        area = polygon_area_m2(points)
-        if len(points) < 3:
+        total_area = sum(polygon_area_m2(area) for area in self.flight_areas)
+        self.count_label.setText(f"Flugbereiche: {len(self.flight_areas)} · Punkte (ausgewählt): {len(points)}")
+        if not self.flight_areas:
             self.area_label.setText("Fläche: — (mindestens 3 Punkte)")
-        elif area >= 1_000_000:
-            effective = max(0, area - sum(polygon_area_m2(zone) for zone in self.no_fly_zones))
+        elif total_area >= 1_000_000:
+            effective = max(0, total_area - sum(polygon_area_m2(zone) for zone in self.no_fly_zones))
             self.area_label.setText(
-                f"Fläche: {area / 1_000_000:,.3f} km² (effektiv: {effective / 1_000_000:,.3f} km²)"
+                f"Fläche: {total_area / 1_000_000:,.3f} km² (effektiv: {effective / 1_000_000:,.3f} km²)"
                 .replace(",", "X").replace(".", ",").replace("X", ".")
             )
         else:
-            effective = max(0, area - sum(polygon_area_m2(zone) for zone in self.no_fly_zones))
-            self.area_label.setText(f"Fläche: {area:,.0f} m² (effektiv: {effective:,.0f} m²)".replace(",", "."))
+            effective = max(0, total_area - sum(polygon_area_m2(zone) for zone in self.no_fly_zones))
+            self.area_label.setText(f"Fläche: {total_area:,.0f} m² (effektiv: {effective:,.0f} m²)".replace(",", "."))
         self.coordinates.setPlainText("\n".join(f"{lat:.7f}, {lon:.7f}" for lat, lon in points))
+        self.flight_area_list.clear()
+        for index, area in enumerate(self.flight_areas, start=1):
+            name = self.flight_area_names[index - 1]
+            self.flight_area_list.addItem(f"{name} · {polygon_area_m2(area):,.0f} m²".replace(",", "."))
         self.zone_list.clear()
         for index, zone in enumerate(self.no_fly_zones, start=1):
             name = self.no_fly_names[index-1] if index <= len(self.no_fly_names) else f"Sperrgebiet {index}"
@@ -2186,9 +2286,33 @@ class MainWindow(QMainWindow):
         self._refresh_geometry_ui()
 
     def _update_zone_summary(self):
-        active_area = polygon_area_m2(self.points)
-        area_text = "—" if len(self.points) < 3 else f"{active_area:,.0f} m²".replace(",", ".")
-        self.zone_summary.setText(f"Aktive Zone: {area_text} · Sperrgebiete: {len(self.no_fly_zones)}")
+        total_area = sum(polygon_area_m2(area) for area in self.flight_areas)
+        area_text = "—" if not self.flight_areas else f"{total_area:,.0f} m²".replace(",", ".")
+        self.zone_summary.setText(f"Flugbereiche: {len(self.flight_areas)} ({area_text}) · Sperrgebiete: {len(self.no_fly_zones)}")
+
+    def delete_selected_flight_area(self):
+        row = self.flight_area_list.currentRow()
+        if row >= 0:
+            self.js(f"deleteFlightArea({row})")
+
+    def select_flight_area(self, row: int):
+        self.js(f"selectFlightArea({row})")
+        if 0 <= row < len(self.flight_areas):
+            self.points = self.flight_areas[row]
+            self.coordinates.setPlainText("\n".join(f"{lat:.7f}, {lon:.7f}" for lat, lon in self.points))
+
+    def clear_flight_area_selection(self):
+        self.flight_area_list.clearSelection()
+        self.js("selectFlightArea(-1)")
+
+    def rename_flight_area(self, item):
+        row = self.flight_area_list.row(item)
+        if row < 0 or row >= len(self.flight_area_names):
+            return
+        name, accepted = QInputDialog.getText(self, "Flugbereich umbenennen", "Name:", text=self.flight_area_names[row])
+        if accepted and name.strip():
+            self.flight_area_names[row] = name.strip()
+            self._refresh_geometry_ui()
 
     def delete_selected_no_fly(self):
         row = self.zone_list.currentRow()
@@ -2204,58 +2328,61 @@ class MainWindow(QMainWindow):
             self.no_fly_names[row] = name.strip()
             self._refresh_geometry_ui()
 
-    def _planning_direction(self) -> float:
+    def _planning_direction(self, area: list[list[float]] | None = None) -> float:
+        area = area or self.points
         if self._canonical(self.direction_mode.currentText()) == "Optimal (kürzeste Flugzeit)":
             self.statusBar().showMessage("Optimiere Bahnausrichtung …")
-            angle = shortest_route_direction_deg(self.points, self.path_spacing.value(), self.no_fly_zones)
+            angle = shortest_route_direction_deg(area, self.path_spacing.value(), self.no_fly_zones)
             self.direction.setValue(angle)
             return angle
         return self.direction.value()
 
-    def _coverage_route(self) -> list[list[float]]:
-        # "Durchfliegen" lässt Sperrgebiete bewusst bei der Bahnberechnung aus.
+    def _coverage_routes(self) -> list[list[list[float]]]:
+        """Plan each drawn flight area independently; never join separate areas."""
         zones = [] if self.no_fly_mode.currentText() == "Sperrgebiet durchfliegen" else self.no_fly_zones
         mode = self._canonical(self.route_mode.currentText())
         use_overshoot = mode == "Overshooting"
         self.overshoot_paths = []
         self.curve_speed_point_keys = set()
-        planning_area = self._inset_support_area() if mode == "Stützpunkte für geradere Bahnen" and self.keep_support_route_inside else self.points
-        route = generate_lawnmower_route(
-            planning_area, self.path_spacing.value(), self._planning_direction(), zones,
-            use_overshoot or self.outside_area_mode.currentText() == "Außerhalb erlaubt",
-        )
-        if mode == "Stützpunkte für geradere Bahnen":
-            route, curve_indices = densify_route(
-                route, self.support_spacing.value(), self.reduced_support_points, return_curve_speed_indices=True
+        routes = []
+        for area in self.flight_areas:
+            planning_area = self._inset_support_area(area) if mode == "Stützpunkte für geradere Bahnen" and self.keep_support_route_inside else area
+            route = generate_lawnmower_route(
+                planning_area, self.path_spacing.value(), self._planning_direction(area), zones,
+                use_overshoot or self.outside_area_mode.currentText() == "Außerhalb erlaubt",
             )
-            self.curve_speed_point_keys = {self._point_key(route[index]) for index in curve_indices}
-        elif use_overshoot:
-            route, self.overshoot_paths = add_overshoot_turns(
-                route, self.overshoot_distance.value(), self.reduced_overshoot_points
-            )
-            # waypointSpeed governs travel *from* a waypoint to the next one:
-            # mark only the legs that enter or remain in the exterior U-turn.
-            self.curve_speed_point_keys = {
-                self._point_key(point) for path in self.overshoot_paths for point in path[:-1]
-            }
-        return route
+            if mode == "Stützpunkte für geradere Bahnen":
+                route, curve_indices = densify_route(route, self.support_spacing.value(), self.reduced_support_points, return_curve_speed_indices=True)
+                self.curve_speed_point_keys.update(self._point_key(route[index]) for index in curve_indices)
+            elif use_overshoot:
+                route, exterior_paths = add_overshoot_turns(route, self.overshoot_distance.value(), self.reduced_overshoot_points)
+                self.overshoot_paths.extend(exterior_paths)
+                self.curve_speed_point_keys.update(self._point_key(point) for path in exterior_paths for point in path[:-1])
+            if len(route) >= 2:
+                routes.append(route)
+        return routes
 
-    def _inset_support_area(self):
+    def _coverage_route(self) -> list[list[float]]:
+        routes = self._coverage_routes()
+        return routes[0] if routes else []
+
+    def _inset_support_area(self, area: list[list[float]] | None = None):
         """Inset the planning area by one support distance for the safety option."""
-        latitude_origin = sum(point[0] for point in self.points) / len(self.points)
-        longitude_origin = sum(point[1] for point in self.points) / len(self.points)
+        area = area or self.points
+        latitude_origin = sum(point[0] for point in area) / len(area)
+        longitude_origin = sum(point[1] for point in area) / len(area)
         latitude_scale = 111_132.92
         longitude_scale = 111_319.49 * math.cos(math.radians(latitude_origin))
-        local = [((lon - longitude_origin) * longitude_scale, (lat - latitude_origin) * latitude_scale) for lat, lon in self.points]
+        local = [((lon - longitude_origin) * longitude_scale, (lat - latitude_origin) * latitude_scale) for lat, lon in area]
         inset = Polygon(local).buffer(-self.support_spacing.value())
         if inset.is_empty:
             self.statusBar().showMessage("Sicherheitsabstand zu groß: Es wird die ursprüngliche Flugfläche verwendet.", 5000)
-            return self.points
+            return area
         if inset.geom_type == "MultiPolygon":
             inset = max(inset.geoms, key=lambda geometry: geometry.area)
         if inset.geom_type != "Polygon" or len(inset.exterior.coords) < 4:
             self.statusBar().showMessage("Flugfläche konnte nicht sicher verkleinert werden.", 5000)
-            return self.points
+            return area
         return [[latitude_origin + y / latitude_scale, longitude_origin + x / longitude_scale] for x, y in list(inset.exterior.coords)[:-1]]
 
     @staticmethod
@@ -2275,7 +2402,7 @@ class MainWindow(QMainWindow):
 
     def _overshoot_zone_feature(self):
         """Build the visible exterior flight-zone allowance around overshoot paths."""
-        if not self.overshoot_paths or len(self.points) < 3:
+        if not self.overshoot_paths or not self.flight_areas:
             return None
         all_points = self.points + [point for path in self.overshoot_paths for point in path]
         latitude_origin = sum(point[0] for point in all_points) / len(all_points)
@@ -2289,7 +2416,8 @@ class MainWindow(QMainWindow):
         corridor = unary_union([LineString([local(point) for point in path]) for path in self.overshoot_paths])
         # The cyan zone is deliberately 2 m wider than the planned exterior
         # path, but clipped so the original user-drawn flight area stays clear.
-        exterior = corridor.buffer(self.overshoot_distance.value() + 2.0).difference(Polygon([local(point) for point in self.points]))
+        flight_area_geometry = unary_union([Polygon([local(point) for point in area]) for area in self.flight_areas])
+        exterior = corridor.buffer(self.overshoot_distance.value() + 2.0).difference(flight_area_geometry)
         if exterior.is_empty:
             return None
 
@@ -2327,23 +2455,34 @@ class MainWindow(QMainWindow):
     def _turn_delay_seconds(self) -> float:
         return 3.0 if self._canonical(self.route_mode.currentText()) == "WPML gerade / Punktstopp (nicht garantiert)" else 0.0
 
+    def _missions_for_area_routes(self, area_routes, force: bool = False):
+        """Split each area on its own so no mission contains a transfer between areas."""
+        missions = []
+        for route in area_routes:
+            parts = [route] if force else plan_missions(
+                route, int(self.max_waypoints.value()), self.max_flight_minutes.value() * 60,
+                self._effective_speed(), self.split_mode.currentText(), self._turn_delay_seconds(),
+            )
+            if not parts:
+                return []
+            missions.extend(parts)
+        return missions
+
     def generate_mission(self):
-        if len(self.points) < 3:
+        if not self.flight_areas:
             QMessageBox.warning(self, "Polygon fehlt", "Bitte zeichne zuerst mindestens drei Punkte im Tab „Fluggebiet planen“.")
             return
         self.force_single_mission = False
         self.force_one_button.setVisible(False)
-        route = self._coverage_route()
-        if len(route) < 2:
+        area_routes = self._coverage_routes()
+        if not area_routes:
             QMessageBox.warning(self, "Keine Route", "Für dieses Polygon konnten keine gültigen Flugbahnen erzeugt werden.")
             return
+        route = [point for area_route in area_routes for point in area_route]
         self.generated_route = route
-        self.generated_missions = plan_missions(
-            route, int(self.max_waypoints.value()), self.max_flight_minutes.value() * 60,
-            self._effective_speed(), self.split_mode.currentText(), self._turn_delay_seconds(),
-        )
+        self.generated_missions = self._missions_for_area_routes(area_routes)
         if not self.generated_missions:
-            self.js(f"showMission({json.dumps(route)})")
+            self.js(f"showMissions({json.dumps(area_routes)})")
             self.mission_summary.setText(f"{len(route)} Wegpunkte · keine gültige Teilung mit den aktuellen Grenzen möglich.")
             self.waypoint_warning.setText("⚠ Fehler: Eine Teilmission würde das Wegpunkt- oder Flugzeitlimit überschreiten.")
             self.waypoint_warning.setStyleSheet("color:#b42318;font-weight:600;")
@@ -2377,7 +2516,7 @@ class MainWindow(QMainWindow):
             limit_reasons.append(f"Flugzeit über {int(self.max_flight_minutes.value())} min pro Mission")
         if len(self.generated_missions) > 1:
             self.waypoint_warning.setText(
-                f"✓ {len(self.generated_missions)} Teilmissionen benötigt: " + " und ".join(limit_reasons) + "."
+                f"✓ {len(self.generated_missions)} getrennte Teilmissionen: " + (" und ".join(limit_reasons) + "." if limit_reasons else "je Flugbereich separat.")
             )
             self.waypoint_warning.setStyleSheet("color:#167a36;font-weight:600;")
             self.force_one_button.setVisible(True)
@@ -2396,12 +2535,13 @@ class MainWindow(QMainWindow):
         if len(self.generated_route) < 2:
             return
         self.force_single_mission = True
-        self.generated_missions = [self.generated_route]
+        area_routes = self._coverage_routes()
+        self.generated_missions = self._missions_for_area_routes(area_routes, force=True)
         self._show_missions(self.generated_missions)
-        duration_s = estimated_route_seconds(self.generated_route, self._effective_speed(), self._turn_delay_seconds())
+        duration_s = sum(estimated_route_seconds(mission, self._effective_speed(), self._turn_delay_seconds()) for mission in self.generated_missions)
         minutes, seconds = divmod(round(duration_s), 60)
         self.mission_summary.setText(
-            f"{len(self.generated_route)} Wegpunkte · 1 erzwungene Mission · ≈ {minutes}:{seconds:02d} min"
+            f"{len(self.generated_route)} Wegpunkte · {len(self.generated_missions)} erzwungene Mission(en) · ≈ {minutes}:{seconds:02d} min"
         )
         exceeded = []
         if len(self.generated_route) > int(self.max_waypoints.value()):
@@ -2414,17 +2554,12 @@ class MainWindow(QMainWindow):
         self.force_one_button.setVisible(False)
 
     def _export_missions(self) -> list[list[list[float]]]:
-        if len(self.points) < 3:
+        if not self.flight_areas:
             QMessageBox.warning(self, "Keine Route", "Bitte zeichne ein Gebiet und generiere zuerst eine Route.")
             return []
-        self.generated_route = self._coverage_route()
-        if self.force_single_mission:
-            self.generated_missions = [self.generated_route]
-        else:
-            self.generated_missions = plan_missions(
-                self.generated_route, int(self.max_waypoints.value()), self.max_flight_minutes.value() * 60,
-                self._effective_speed(), self.split_mode.currentText(), self._turn_delay_seconds(),
-            )
+        area_routes = self._coverage_routes()
+        self.generated_route = [point for route in area_routes for point in route]
+        self.generated_missions = self._missions_for_area_routes(area_routes, self.force_single_mission)
         if not self.generated_missions:
             QMessageBox.warning(self, "Export nicht möglich", "Die Route kann unter den aktuellen Wegpunkt- und Flugzeitgrenzen nicht aufgeteilt werden.")
             return []
@@ -2446,7 +2581,7 @@ class MainWindow(QMainWindow):
             destination, route, self.altitude.value(), self._effective_speed(), self.gimbal_pitch.value(),
             self._export_photo_mode(), self.photo_distance.value(), self.route_mode.currentText(),
             finish_actions[self._canonical(self.finish_action.currentText())], signal_loss_actions[self._canonical(self.signal_loss_action.currentText())],
-            self._waypoint_speeds(route),
+            self._waypoint_speeds(route), self._drone_capabilities().supports_wpml_gimbal_pitch,
         )
         return True
 
@@ -2455,11 +2590,12 @@ class MainWindow(QMainWindow):
         width, height, margin = 400, 300, 24
         image = QImage(width, height, QImage.Format.Format_RGB32)
         image.fill(QColor("#f7f9fc"))
-        all_points = self.points + [point for zone in self.no_fly_zones for point in zone] + [point for mission in missions for point in mission]
+        all_points = [point for area in self.flight_areas for point in area] + [point for zone in self.no_fly_zones for point in zone] + [point for mission in missions for point in mission]
         min_lat, max_lat = min(point[0] for point in all_points), max(point[0] for point in all_points)
         min_lon, max_lon = min(point[1] for point in all_points), max(point[1] for point in all_points)
         lat_span, lon_span = max(max_lat - min_lat, 1e-8), max(max_lon - min_lon, 1e-8)
-        draw_top = margin + (28 if include_title else 0)
+        title_height = 60 if include_title else 0
+        draw_top = margin + title_height
         available_width, available_height = width - 2 * margin, height - draw_top - margin
         scale = min(available_width / lon_span, available_height / lat_span)
         content_width, content_height = lon_span * scale, lat_span * scale
@@ -2488,9 +2624,20 @@ class MainWindow(QMainWindow):
         if include_title:
             title = self.thumbnail_title.text().strip() or self.mission_name.text().strip() or "ACMP-Mission"
             painter.setPen(QColor("#172b4d"))
-            painter.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-            painter.drawText(margin, 7, width - 2 * margin, 22, 0, title)
-        draw_area(painter, self.points, QColor(65, 150, 255, 58), "#1261a0", 2)
+            title_width = width - 2 * margin
+            # Select the largest font that fits the complete title into the
+            # image width.  A pixel size is used so the JPEG is independent of
+            # display-DPI settings.
+            font = QFont("Segoe UI")
+            font.setBold(True)
+            for pixel_size in range(title_height - 8, 0, -1):
+                font.setPixelSize(pixel_size)
+                if QFontMetrics(font).horizontalAdvance(title) <= title_width:
+                    break
+            painter.setFont(font)
+            painter.drawText(margin, 7, title_width, title_height - 8, Qt.AlignmentFlag.AlignCenter, title)
+        for area in self.flight_areas:
+            draw_area(painter, area, QColor(65, 150, 255, 58), "#1261a0", 2)
         for zone in self.no_fly_zones:
             draw_area(painter, zone, QColor(220, 38, 38, 75), "#c92525", 2)
         colors = ["#d13c10", "#7b3fb2", "#087f5b", "#9a6700", "#1261a0"]
@@ -2547,14 +2694,14 @@ class MainWindow(QMainWindow):
         enforce_zones=self.no_fly_mode.currentText()=="Sperrgebiet umfliegen"
         for mission_number, mission in enumerate(missions, 1):
             for point_number, point in enumerate(mission, 1):
-                if enforce_area and not self._point_in_polygon(point, self.points):
+                if enforce_area and not any(self._point_in_polygon(point, area) for area in self.flight_areas):
                     errors.append(f"Mission {mission_number}, WP {point_number}: außerhalb des Flugbereichs")
                 if enforce_zones and any(self._point_in_polygon(point, zone) for zone in self.no_fly_zones):
                     errors.append(f"Mission {mission_number}, WP {point_number}: im Sperrgebiet")
             for first, second in zip(mission, mission[1:]):
                 for step in range(1, 25):
                     sample=[first[0]+(second[0]-first[0])*step/25, first[1]+(second[1]-first[1])*step/25]
-                    if enforce_area and not self._point_in_polygon(sample, self.points): errors.append(f"Mission {mission_number}: Strecke verlässt Flugbereich"); break
+                    if enforce_area and not any(self._point_in_polygon(sample, area) for area in self.flight_areas): errors.append(f"Mission {mission_number}: Strecke verlässt Flugbereich"); break
                     if enforce_zones and any(self._point_in_polygon(sample, zone) for zone in self.no_fly_zones): errors.append(f"Mission {mission_number}: Strecke kreuzt Sperrgebiet"); break
         return list(dict.fromkeys(errors))
 

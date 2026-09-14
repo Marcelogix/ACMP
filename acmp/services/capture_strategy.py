@@ -14,6 +14,7 @@ class DroneCapabilities:
     category: str
     supports_wpml_distance_trigger: bool
     supports_wpml_time_trigger: bool
+    supports_wpml_gimbal_pitch: bool
     requires_manual_interval_capture: bool
     supported_photo_intervals: tuple[float, ...]
     min_mapping_speed: float
@@ -24,6 +25,7 @@ CONSUMER_CAPABILITIES = DroneCapabilities(
     category="consumer",
     supports_wpml_distance_trigger=False,
     supports_wpml_time_trigger=False,
+    supports_wpml_gimbal_pitch=False,
     requires_manual_interval_capture=True,
     # Conservative, commonly available DJI Fly interval choices.  Model
     # profiles can replace this tuple without changing UI or export code.
@@ -36,6 +38,7 @@ ENTERPRISE_CAPABILITIES = DroneCapabilities(
     category="prosumer_enterprise",
     supports_wpml_distance_trigger=True,
     supports_wpml_time_trigger=False,
+    supports_wpml_gimbal_pitch=True,
     requires_manual_interval_capture=False,
     supported_photo_intervals=(),
     min_mapping_speed=0.5,

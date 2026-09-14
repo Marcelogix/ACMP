@@ -5,7 +5,7 @@ import zipfile
 from pathlib import Path
 from acmp.i18n import canonical_ui_text
 
-def build_dji_kmz(destination: Path, route, altitude_m, speed_mps, gimbal_pitch, photo_mode, photo_distance_m, route_mode, finish_action, signal_loss_action, waypoint_speeds=None):
+def build_dji_kmz(destination: Path, route, altitude_m, speed_mps, gimbal_pitch, photo_mode, photo_distance_m, route_mode, finish_action, signal_loss_action, waypoint_speeds=None, use_point_gimbal_pitch=True):
     if len(route) < 2: raise ValueError("Mindestens zwei Wegpunkte werden benötigt.")
     photo_mode=canonical_ui_text(photo_mode); route_mode=canonical_ui_text(route_mode); stamp=int(time.time()*1000)
     turn="toPointAndStopWithDiscontinuityCurvature" if route_mode=="WPML gerade / Punktstopp (nicht garantiert)" else "toPointAndPassWithContinuityCurvature"
@@ -17,14 +17,15 @@ def build_dji_kmz(destination: Path, route, altitude_m, speed_mps, gimbal_pitch,
         action=""
         if photo_mode=="Foto bei jedem Wegpunkt": action=f"<wpml:actionGroup><wpml:actionGroupId>{i}</wpml:actionGroupId><wpml:actionGroupStartIndex>{i}</wpml:actionGroupStartIndex><wpml:actionGroupEndIndex>{i}</wpml:actionGroupEndIndex><wpml:actionGroupMode>sequence</wpml:actionGroupMode><wpml:actionTrigger><wpml:actionTriggerType>reachPoint</wpml:actionTriggerType></wpml:actionTrigger><wpml:action><wpml:actionId>0</wpml:actionId><wpml:actionActuatorFunc>takePhoto</wpml:actionActuatorFunc><wpml:actionActuatorFuncParam><wpml:payloadPositionIndex>0</wpml:payloadPositionIndex></wpml:actionActuatorFuncParam></wpml:action></wpml:actionGroup>"
         waypoint_speed=min(float(speed_mps),max(.5,float(waypoint_speeds[i])))
-        marks.append(f"<Placemark><Point><coordinates>{lon:.8f},{lat:.8f}</coordinates></Point><wpml:index>{i}</wpml:index><wpml:executeHeight>{altitude_m:.1f}</wpml:executeHeight><wpml:waypointSpeed>{waypoint_speed:.1f}</wpml:waypointSpeed><wpml:waypointTurnParam><wpml:waypointTurnMode>{turn}</wpml:waypointTurnMode><wpml:waypointTurnDampingDist>0</wpml:waypointTurnDampingDist></wpml:waypointTurnParam>{action}</Placemark>")
+        gimbal_angle = f"<wpml:gimbalPitchAngle>{gimbal_pitch:.1f}</wpml:gimbalPitchAngle>" if use_point_gimbal_pitch else ""
+        marks.append(f"<Placemark><Point><coordinates>{lon:.8f},{lat:.8f}</coordinates></Point><wpml:index>{i}</wpml:index><wpml:executeHeight>{altitude_m:.1f}</wpml:executeHeight><wpml:waypointSpeed>{waypoint_speed:.1f}</wpml:waypointSpeed><wpml:waypointTurnParam><wpml:waypointTurnMode>{turn}</wpml:waypointTurnMode><wpml:waypointTurnDampingDist>0</wpml:waypointTurnDampingDist></wpml:waypointTurnParam>{gimbal_angle}{action}</Placemark>")
     interval=""
     if photo_mode=="Foto nach Distanzintervall": interval=f"<wpml:actionGroup><wpml:actionGroupId>0</wpml:actionGroupId><wpml:actionGroupStartIndex>0</wpml:actionGroupStartIndex><wpml:actionGroupEndIndex>{len(route)-1}</wpml:actionGroupEndIndex><wpml:actionGroupMode>sequence</wpml:actionGroupMode><wpml:actionTrigger><wpml:actionTriggerType>multipleDistance</wpml:actionTriggerType><wpml:actionTriggerParam>{photo_distance_m:.1f}</wpml:actionTriggerParam></wpml:actionTrigger><wpml:action><wpml:actionId>0</wpml:actionId><wpml:actionActuatorFunc>takePhoto</wpml:actionActuatorFunc><wpml:actionActuatorFuncParam><wpml:payloadPositionIndex>0</wpml:payloadPositionIndex></wpml:actionActuatorFuncParam></wpml:action></wpml:actionGroup>"
     ns='xmlns="http://www.opengis.net/kml/2.2" xmlns:wpml="http://www.dji.com/wpmz/1.0.2"'
-    # ``fixed`` is essential: without it DJI Fly/Pilot may label the mission
-    # gimbal mode as manual and ignore the supplied pitch.  The pitch belongs
-    # to the wayline-level setting, not to an otherwise-manual waypoint.
-    folder=f"<Folder><wpml:templateId>0</wpml:templateId><wpml:waylineId>0</wpml:waylineId><wpml:autoFlightSpeed>{speed_mps:.1f}</wpml:autoFlightSpeed><wpml:gimbalPitchMode>fixed</wpml:gimbalPitchMode><wpml:gimbalPitchAngle>{gimbal_pitch:.1f}</wpml:gimbalPitchAngle>{interval}{''.join(marks)}</Folder>"
+    # Point settings are documented for Enterprise/Prosumer waypoint WPML.
+    # DJI Fly consumer missions ignore them and remain controller-manual.
+    gimbal_mode = "<wpml:gimbalPitchMode>usePointSetting</wpml:gimbalPitchMode>" if use_point_gimbal_pitch else ""
+    folder=f"<Folder><wpml:templateId>0</wpml:templateId><wpml:waylineId>0</wpml:waylineId><wpml:autoFlightSpeed>{speed_mps:.1f}</wpml:autoFlightSpeed>{gimbal_mode}{interval}{''.join(marks)}</Folder>"
     xml=f'<?xml version="1.0" encoding="UTF-8"?><kml {ns}><Document><wpml:createTime>{stamp}</wpml:createTime>{config}{folder}</Document></kml>'
     with zipfile.ZipFile(destination,"w",zipfile.ZIP_DEFLATED) as z:
         z.writestr("wpmz/template.kml",xml); z.writestr("wpmz/waylines.wpml",xml)
