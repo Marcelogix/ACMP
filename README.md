@@ -17,6 +17,9 @@ ACMP is a desktop tool for drawing mapping areas on an interactive map, planning
 - Set mission limits for maximum waypoints and flight duration.
 - Automatically split large routes into multiple missions when limits are exceeded.
 - Configure camera actions and photo spacing for photogrammetry workflows.
+- Show official **Germany-only** UAS geozones and inspect affected areas before route planning.
+- Highlight or exclude individual geozone conflicts, including clipped intersection areas.
+- Show selected Germany-wide protected-area layers as local-rule hints; these are not blanket no-fly zones.
 
 ## Start
 
@@ -29,13 +32,14 @@ The map and address search require an internet connection.
 
 ## Usage
 
-1. In **Map & Area**, search for an address or use your current location.
+1. In **Plan Flight Area**, search for an address or use your current location.
 2. Draw the flight area as a polygon, rectangle, or circle.
 3. Add red no-fly zones where the drone must not fly.
-4. In **Flight Settings**, choose altitude, speed, path spacing, direction, camera action, and mission limits.
-5. Generate the route and inspect its waypoints on the map.
-6. Save the editable project from **File → Save As** when you want to continue later.
-7. Export the planned mission as a DJI-compatible KMZ file from **Export**.
+4. Optionally enable **Germany-only** UAS geozones or local-rule hints, then use the map inspection buttons to identify areas at a point.
+5. In **Flight Settings**, choose altitude, speed, path spacing, direction, camera action, and mission limits. Settings are restored automatically on the next start.
+6. Generate the route and inspect its waypoints on the map.
+7. Save the editable project from **File → Save As** when you want to continue later.
+8. Export the planned mission as a DJI-compatible KMZ file from **Export**.
 
 ## DJI RC Import Workflow
 
@@ -55,3 +59,4 @@ The map and address search require an internet connection.
 ## Notes
 
 - You are responsible for local regulations, obstacle clearance, aircraft limits, and safe operation.
+- Germany-only UAS geozones and local-rule hints are planning aids. They do not replace current NOTAMs, official approvals, or local protection regulations.
