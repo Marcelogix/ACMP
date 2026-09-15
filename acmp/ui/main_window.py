@@ -423,9 +423,10 @@ function showMissions(missions, summaries=[], estimatedPaths=[], overshootPaths=
     }
   }); });
 }
-function showPoiLevels(levels, selectedLevel=0, estimatedPaths=[]){
+function showPoiLevels(levels, selectedLevel=0, estimatedPaths=[], outsideZone=null){
   clearMission();
   if(!levels.length) return;
+  if(outsideZone) L.geoJSON(outsideZone,{style:{color:'#00bcd4',weight:2,fillColor:'#00c8e8',fillOpacity:.18,dashArray:'8 5'},onEachFeature:(_feature,layer)=>layer.bindTooltip('POI-Bahn außerhalb des gezeichneten Flugbereichs', {sticky:true})}).addTo(overshootZoneLayer);
   const legend=levels.map((level,index)=>{const name=level.kind==='roof_capture'?mapText('Dachbahn'):`${mapText('Ebene')} ${index+1}`; return `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:hsl(${220-index*190/Math.max(1,levels.length-1)},78%,45%);margin-right:5px"></span>${name} · H: ${level.altitude.toFixed(1)} m · ${level.waypoints} WP · ≈ ${level.durationText} min · ${level.gimbal.toFixed(0)}°`;}).join('<br>');
   const div=document.getElementById('acmp-mission-legend');
   if(div){
@@ -1071,6 +1072,17 @@ class MainWindow(QMainWindow):
         self.poi_capture_type.currentTextChanged.connect(self._poi_capture_type_changed)
         self.poi_orbit_geometry = QComboBox()
         self.poi_orbit_geometry.addItems(["Automatisch", "Kreis um Mittelpunkt", "Kontur mit Abstand"])
+        self.poi_avoidance_mode = QComboBox()
+        self.poi_avoidance_mode.addItems([
+            "Standard (DJI-Näherung: glatte Kurven)",
+            "Stützpunkte für geradere Bahnen",
+        ])
+        self.poi_avoidance_mode.setToolTip(
+            "Standard hält zusätzlichen Abstand für DJI-Kurvenglättung. "
+            "Stützpunkte darf näher an der Sperrzone entlangführen."
+        )
+        self.poi_support_spacing = self._number(2, 0.5, 100, 0.5, " m")
+        self.poi_avoidance_mode.currentTextChanged.connect(self._poi_avoidance_mode_changed)
         self.poi_flight_path_preview = QCheckBox("Glatte POI-Flugbahn anzeigen (Catmull–Rom)")
         self.poi_flight_path_preview.setChecked(True)
         self.poi_flight_path_preview.setToolTip(
@@ -1110,6 +1122,8 @@ class MainWindow(QMainWindow):
         self.poi_waypoint_action.addItems(["Foto nach Distanzintervall", "Foto bei jedem Wegpunkt", "Keine Aktion", "2 s schweben"])
         poi_settings_form.addRow("Aufnahmeart:", self.poi_capture_type)
         poi_settings_form.addRow("Bahnform:", self.poi_orbit_geometry)
+        poi_settings_form.addRow("POI-Umfahrungsmodus:", self.poi_avoidance_mode)
+        poi_settings_form.addRow("Stützpunkt-Abstand an Sperrzonen-Ecken:", self.poi_support_spacing)
         poi_settings_form.addRow(self.poi_flight_path_preview)
         poi_settings_form.addRow("Fassadenrichtung:", self.poi_facade_bearing)
         poi_settings_form.addRow("Umlaufrichtung:", self.poi_orbit_direction)
@@ -1179,11 +1193,17 @@ class MainWindow(QMainWindow):
         self.outside_area_mode.addItems(["Außerhalb erlaubt", "Nein (außer Overshooting)"])
         self.no_fly_mode = QComboBox()
         self.no_fly_mode.addItems(["Sperrgebiet umfliegen", "Sperrgebiet durchfliegen"])
+        # These values are intentionally retained independently while the
+        # visible choices are exchanged for the POI-only policies.
+        self._terrain_outside_area_mode = self.outside_area_mode.currentText()
+        self._terrain_no_fly_mode = self.no_fly_mode.currentText()
+        self._poi_outside_area_mode = "Außerhalb erlaubt"
+        self._poi_no_fly_mode = "Sperrgebiet umfliegen"
         limit_form.addRow("Außerhalb des Flugbereichs:", self.outside_area_mode)
         limit_form.addRow("Bei Sperrgebieten:", self.no_fly_mode)
         for field in (
             self.direction_mode, self.route_mode, self.waypoint_action, self.poi_capture_type,
-            self.poi_orbit_geometry, self.poi_orbit_direction, self.poi_waypoint_action, self.split_mode, self.finish_action,
+            self.poi_orbit_geometry, self.poi_orbit_direction, self.poi_waypoint_action, self.poi_avoidance_mode, self.split_mode, self.finish_action,
             self.signal_loss_action, self.outside_area_mode, self.no_fly_mode,
         ):
             field.setFixedWidth(168)
@@ -1325,6 +1345,7 @@ class MainWindow(QMainWindow):
         self._apply_interface_mode()
 
         self._poi_capture_type_changed(self.poi_capture_type.currentText())
+        self._poi_avoidance_mode_changed(self.poi_avoidance_mode.currentText())
         self._restore_last_flight_settings()
         self._connect_flight_settings_autosave()
         self._update_photogrammetry_geometry()
@@ -1338,6 +1359,7 @@ class MainWindow(QMainWindow):
         ))
         self._right_align_form_fields(poi_settings_form, (
             self.poi_capture_type, self.poi_orbit_geometry, self.poi_facade_bearing, self.poi_orbit_direction,
+            self.poi_avoidance_mode, self.poi_support_spacing,
             poi_detail_widget, self.poi_object_height, self.poi_distance, self.poi_min_altitude,
             self.poi_max_altitude, self.poi_vertical_overlap, self.poi_along_overlap,
             self.poi_speed, self.poi_minimum_interval_duration, self.poi_waypoint_action,
@@ -1682,6 +1704,8 @@ class MainWindow(QMainWindow):
             "signal_loss_action": self.signal_loss_action.currentText(),
             "outside_area_mode": self.outside_area_mode.currentText(), "no_fly_mode": self.no_fly_mode.currentText(),
             "poi_capture_type": self.poi_capture_type.currentText(), "poi_orbit_geometry": self.poi_orbit_geometry.currentText(),
+            "poi_avoidance_mode": self.poi_avoidance_mode.currentText(),
+            "poi_support_spacing": self.poi_support_spacing.value(),
             "poi_facade_bearing": self.poi_facade_bearing.value(), "poi_orbit_direction": self.poi_orbit_direction.currentText(),
             "poi_object_height": self.poi_object_height.value(),
             "poi_distance": self.poi_distance.value(), "poi_min_altitude": self.poi_min_altitude.value(),
@@ -2033,7 +2057,7 @@ class MainWindow(QMainWindow):
             (self.poi_distance, "poi_distance"), (self.poi_min_altitude, "poi_min_altitude"),
             (self.poi_max_altitude, "poi_max_altitude"), (self.poi_vertical_overlap, "poi_vertical_overlap"),
             (self.poi_along_overlap, "poi_along_overlap"), (self.poi_speed, "poi_speed"),
-            (self.poi_minimum_interval_duration, "poi_minimum_interval_duration"),
+            (self.poi_minimum_interval_duration, "poi_minimum_interval_duration"), (self.poi_support_spacing, "poi_support_spacing"),
         ]
         for field, key in number_fields:
             if key in values:
@@ -2044,6 +2068,7 @@ class MainWindow(QMainWindow):
             (self.finish_action, "finish_action"), (self.signal_loss_action, "signal_loss_action"),
             (self.no_fly_mode, "no_fly_mode"),
             (self.poi_capture_type, "poi_capture_type"), (self.poi_orbit_geometry, "poi_orbit_geometry"),
+            (self.poi_avoidance_mode, "poi_avoidance_mode"),
             (self.poi_orbit_direction, "poi_orbit_direction"),
             (self.poi_waypoint_action, "poi_waypoint_action"),
         ]
@@ -2298,6 +2323,15 @@ class MainWindow(QMainWindow):
         """Switch only the context-specific controls; areas and no-fly zones stay global."""
         if mode not in {"terrain", "poi"}:
             return
+        previous_mode = getattr(self, "mission_mode", "terrain")
+        if hasattr(self, "outside_area_mode"):
+            if previous_mode == "poi":
+                self._poi_outside_area_mode = self.outside_area_mode.currentText()
+                self._poi_no_fly_mode = self.no_fly_mode.currentText()
+            else:
+                self._terrain_outside_area_mode = self.outside_area_mode.currentText()
+                self._terrain_no_fly_mode = self.no_fly_mode.currentText()
+            self._replace_policy_options(mode)
         self.mission_mode = mode
         is_poi = mode == "poi"
         self.terrain_mode_button.setChecked(not is_poi)
@@ -2334,11 +2368,39 @@ class MainWindow(QMainWindow):
         )
         self._save_last_flight_settings()
 
+    def _replace_policy_options(self, mode: str):
+        """Show POI-specific policies without ever changing terrain choices."""
+        is_poi = mode == "poi"
+        outside_options = (
+            ["Außerhalb erlaubt", "Nein, anpassen", "Nein, auslassen"]
+            if is_poi else ["Außerhalb erlaubt", "Nein (außer Overshooting)"]
+        )
+        no_fly_options = (
+            ["Sperrgebiet umfliegen", "Sperrgebiet durchfliegen", "Sperrgebiete auslassen"]
+            if is_poi else ["Sperrgebiet umfliegen", "Sperrgebiet durchfliegen"]
+        )
+        outside_value = self._poi_outside_area_mode if is_poi else self._terrain_outside_area_mode
+        no_fly_value = self._poi_no_fly_mode if is_poi else self._terrain_no_fly_mode
+        for field, options, value in (
+            (self.outside_area_mode, outside_options, outside_value),
+            (self.no_fly_mode, no_fly_options, no_fly_value),
+        ):
+            field.blockSignals(True)
+            field.clear()
+            field.addItems(options)
+            field.setCurrentText(value if value in options else options[0])
+            field.blockSignals(False)
+
     def _poi_capture_type_changed(self, capture_type: str):
         is_facade = self._canonical(capture_type) == "Einzelne Fassade"
         self._set_poi_option_visible(self.poi_facade_bearing, is_facade)
         self._set_poi_option_visible(self.poi_orbit_geometry, not is_facade)
         self._set_poi_option_visible(self.poi_orbit_direction, not is_facade)
+
+    def _poi_avoidance_mode_changed(self, mode: str):
+        self._set_poi_option_visible(
+            self.poi_support_spacing, mode == "Stützpunkte für geradere Bahnen"
+        )
 
     def _poi_control_point_detail_changed(self, value: int):
         if hasattr(self, "poi_control_point_detail_label"):
@@ -2410,7 +2472,7 @@ class MainWindow(QMainWindow):
         )
         self.js(
             f"showPoiLevels({json.dumps(levels)}, {self.poi_level_slider.value()}, "
-            f"{json.dumps(estimated_paths)});"
+            f"{json.dumps(estimated_paths)}, {json.dumps(self._poi_outside_zone_feature())});"
         )
 
     def _set_poi_option_visible(self, field, visible: bool):
@@ -2836,12 +2898,13 @@ class MainWindow(QMainWindow):
             self.max_waypoints, self.max_flight_minutes,
             self.poi_facade_bearing, self.poi_object_height, self.poi_distance, self.poi_min_altitude,
             self.poi_max_altitude, self.poi_vertical_overlap, self.poi_along_overlap, self.poi_speed,
-            self.poi_minimum_interval_duration,
+            self.poi_minimum_interval_duration, self.poi_support_spacing,
         ]
         combo_fields = [
             self.direction_mode, self.route_mode, self.waypoint_action, self.split_mode,
             self.finish_action, self.signal_loss_action, self.outside_area_mode, self.no_fly_mode,
             self.poi_capture_type, self.poi_orbit_geometry, self.poi_orbit_direction, self.poi_waypoint_action,
+            self.poi_avoidance_mode,
         ]
         for field in number_fields:
             field.valueChanged.connect(self._save_last_flight_settings)
@@ -3208,6 +3271,42 @@ class MainWindow(QMainWindow):
             return None
         return {"type": "Feature", "properties": {"kind": "overshoot_zone"}, "geometry": geometry}
 
+    def _poi_outside_zone_feature(self):
+        """Cyan safety hint for POI routes explicitly allowed outside a field."""
+        if (
+            self.mission_mode != "poi" or self.outside_area_mode.currentText() != "Außerhalb erlaubt"
+            or self.generated_poi_plan is None or not self.flight_areas
+        ):
+            return None
+        paths = [
+            [[waypoint.lat, waypoint.lon] for waypoint in band]
+            for band in self.generated_poi_plan.levels if len(band) >= 2
+        ]
+        all_points = [point for path in paths for point in path] + [point for area in self.flight_areas for point in area]
+        if not all_points:
+            return None
+        latitude_origin = sum(point[0] for point in all_points) / len(all_points)
+        longitude_origin = sum(point[1] for point in all_points) / len(all_points)
+        latitude_scale = 111_132.92
+        longitude_scale = 111_319.49 * math.cos(math.radians(latitude_origin))
+        local = lambda point: ((point[1] - longitude_origin) * longitude_scale, (point[0] - latitude_origin) * latitude_scale)
+        corridor = unary_union([LineString([local(point) for point in path]) for path in paths]).buffer(2.0)
+        flight_area = unary_union([Polygon([local(point) for point in area]) for area in self.flight_areas])
+        exterior = corridor.difference(flight_area)
+        if exterior.is_empty:
+            return None
+        def ring(coordinates):
+            return [[longitude_origin + x / longitude_scale, latitude_origin + y / latitude_scale] for x, y in coordinates]
+        def polygon_coordinates(polygon):
+            return [ring(polygon.exterior.coords)] + [ring(interior.coords) for interior in polygon.interiors]
+        if exterior.geom_type == "Polygon":
+            geometry = {"type": "Polygon", "coordinates": polygon_coordinates(exterior)}
+        elif exterior.geom_type == "MultiPolygon":
+            geometry = {"type": "MultiPolygon", "coordinates": [polygon_coordinates(item) for item in exterior.geoms]}
+        else:
+            return None
+        return {"type": "Feature", "properties": {"kind": "poi_outside_zone"}, "geometry": geometry}
+
     def _show_missions(self, missions):
         self._refresh_rc_export_list(missions)
         labels = []
@@ -3311,6 +3410,8 @@ class MainWindow(QMainWindow):
         """Generate POI bands without calling the terrain/lawnmower planner."""
         try:
             capture_plan, _footprint_m = self._poi_capture_plan()
+            no_fly_choice = self.no_fly_mode.currentText()
+            outside_choice = self.outside_area_mode.currentText()
             plan = plan_poi_route(
                 self.poi_area, self.flight_areas, self.no_fly_zones,
                 capture_type=self._canonical(self.poi_capture_type.currentText()),
@@ -3323,6 +3424,16 @@ class MainWindow(QMainWindow):
                 focal_length_mm=self.focal_length.value(), image_ratio=self.image_ratio.currentText(),
                 control_point_detail_pct=self.poi_control_point_detail.value(),
                 orbit_geometry=self._canonical(self.poi_orbit_geometry.currentText()),
+                contour_boundary_clearance_m=(0.25 if self.poi_avoidance_mode.currentText() == "Stützpunkte für geradere Bahnen" else 2.0),
+                contour_support_spacing_m=(self.poi_support_spacing.value() if self.poi_avoidance_mode.currentText() == "Stützpunkte für geradere Bahnen" else None),
+                no_fly_strategy=(
+                    "allow" if no_fly_choice == "Sperrgebiet durchfliegen" else
+                    "skip" if no_fly_choice == "Sperrgebiete auslassen" else "adapt"
+                ),
+                outside_strategy=(
+                    "allow" if outside_choice == "Außerhalb erlaubt" else
+                    "skip" if outside_choice == "Nein, auslassen" else "adapt"
+                ),
             )
         except (POIPlanningError, ValueError) as error:
             QMessageBox.warning(self, "POI-Route nicht möglich", str(error))
@@ -3384,9 +3495,12 @@ class MainWindow(QMainWindow):
         max_points = int(self.max_waypoints.value())
         max_seconds = self.max_flight_minutes.value() * 60
         result, current = [], []
-        for band in plan.levels:
+        for band_index, band in enumerate(plan.levels):
             route = list(band)
             coordinates = lambda points: [[waypoint.lat, waypoint.lon] for waypoint in points]
+            if band_index and band_index < len(plan.separate_before) and plan.separate_before[band_index] and current:
+                result.append(current)
+                current = []
             fits_alone = len(route) <= max_points and estimated_route_seconds(coordinates(route), speed_mps) <= max_seconds
             combined = current + route
             if fits_alone and (not current or (len(combined) <= max_points and estimated_route_seconds(coordinates(combined), speed_mps) <= max_seconds)):
@@ -3416,6 +3530,12 @@ class MainWindow(QMainWindow):
         """Übersteuert nur für diese Route die Teilungsgrenzen, ohne Eingabewerte zu ändern."""
         if self.mission_mode == "poi":
             if not self.generated_poi_waypoint_missions:
+                return
+            if any(self.generated_poi_plan.separate_before[1:]):
+                QMessageBox.information(
+                    self, "Getrennte POI-Bögen",
+                    "Getrennte sichere POI-Bögen bleiben eigene Missionen und können nicht zu einer Mission verbunden werden.",
+                )
                 return
             merged = [
                 waypoint
@@ -3724,11 +3844,16 @@ class MainWindow(QMainWindow):
         return inside
 
     def _export_validation_errors(self, missions):
-        errors=[]; enforce_area=(
-            self._canonical(self.outside_area_mode.currentText()) != "Außerhalb erlaubt"
-            and self._canonical(self.route_mode.currentText()) != "Overshooting"
-        )
-        enforce_zones=self.no_fly_mode.currentText()=="Sperrgebiet umfliegen"
+        errors=[]
+        if self.mission_mode == "poi":
+            enforce_area = self.outside_area_mode.currentText() != "Außerhalb erlaubt"
+            enforce_zones = self.no_fly_mode.currentText() != "Sperrgebiet durchfliegen"
+        else:
+            enforce_area=(
+                self._canonical(self.outside_area_mode.currentText()) != "Außerhalb erlaubt"
+                and self._canonical(self.route_mode.currentText()) != "Overshooting"
+            )
+            enforce_zones=self.no_fly_mode.currentText()=="Sperrgebiet umfliegen"
         for mission_number, mission in enumerate(missions, 1):
             for point_number, point in enumerate(mission, 1):
                 if enforce_area and not any(self._point_in_polygon(point, area) for area in self.flight_areas):

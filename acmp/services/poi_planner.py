@@ -31,6 +31,9 @@ class POIWaypoint:
 class POIRoutePlan:
     levels: tuple[tuple[POIWaypoint, ...], ...]
     vertical_spacing_m: float
+    # A clipped ring may contain several disconnected arcs.  A boundary here
+    # is a hard mission break, never merely a preferred split point.
+    separate_before: tuple[bool, ...] = ()
 
     @property
     def waypoints(self) -> tuple[POIWaypoint, ...]:
@@ -115,7 +118,377 @@ def _safe_circle_coordinates(center, object_radius, distance_m, detail_pct):
 
 
 def _inside_allowed(line, allowed, blocked):
-    return allowed.covers(line) and not any(line.intersects(zone) for zone in blocked)
+    return (allowed is None or allowed.covers(line)) and not any(line.intersects(zone) for zone in blocked)
+
+
+def _line_parts(geometry):
+    """Return only usable, connected pieces from a Shapely line operation."""
+    if geometry.is_empty:
+        return []
+    if geometry.geom_type == "LineString":
+        return [list(geometry.coords)] if geometry.length > 0.05 else []
+    if geometry.geom_type in {"MultiLineString", "GeometryCollection"}:
+        parts = []
+        for item in geometry.geoms:
+            parts.extend(_line_parts(item))
+        return parts
+    return []
+
+
+def _safe_line_parts(line, allowed, blocked):
+    """Clip a route to the permitted airspace without joining separated arcs."""
+    safe = line if allowed is None else line.intersection(allowed)
+    if blocked:
+        safe = safe.difference(unary_union(blocked))
+    parts = _line_parts(safe)
+    # A ring is represented as a line whose first coordinate is repeated at
+    # the end.  Shapely may split its one remaining safe arc at precisely this
+    # artificial seam. Rejoin only that seam; genuinely separate arcs stay
+    # separate and therefore become distinct missions.
+    source = list(line.coords)
+    if len(parts) > 1 and source and source[0] == source[-1]:
+        first, last = parts[0], parts[-1]
+        if math.hypot(first[0][0] - last[-1][0], first[0][1] - last[-1][1]) < 0.05:
+            parts = [last + first[1:]] + parts[1:-1]
+    return parts
+
+
+def _local_detour_route(coordinates, allowed, blocked, object_keepout):
+    """Replace only blocked chords with short visibility-graph detours.
+
+    The object keep-out makes the inner corridor usable when it exists, while
+    still preventing a shortcut through the object.  Candidate corners are
+    shifted beyond their buffered boundary so DJI steering points never sit
+    directly on a safety boundary.
+    """
+    obstacles = list(blocked) + [object_keepout]
+
+    def safe_segment(start, end):
+        segment = LineString([start, end])
+        return (allowed is None or allowed.covers(segment)) and not any(segment.intersects(item) for item in obstacles)
+
+    def detour(start, end):
+        if safe_segment(start, end):
+            return [end]
+        nodes = [start, end]
+        for obstacle in obstacles:
+            if obstacle.geom_type != "Polygon":
+                return None
+            centre = obstacle.centroid
+            for x, y in list(obstacle.exterior.coords)[:-1]:
+                dx, dy = x - centre.x, y - centre.y
+                length = math.hypot(dx, dy) or 1.0
+                nodes.append((x + dx / length * 0.25, y + dy / length * 0.25))
+        distances = [float("inf")] * len(nodes)
+        previous = [-1] * len(nodes)
+        distances[0] = 0.0
+        remaining = set(range(len(nodes)))
+        while remaining:
+            current = min(remaining, key=lambda index: distances[index])
+            if distances[current] == float("inf"):
+                break
+            remaining.remove(current)
+            if current == 1:
+                break
+            for candidate in remaining:
+                if not safe_segment(nodes[current], nodes[candidate]):
+                    continue
+                length = math.dist(nodes[current], nodes[candidate])
+                if distances[current] + length < distances[candidate]:
+                    distances[candidate] = distances[current] + length
+                    previous[candidate] = current
+        if previous[1] < 0:
+            return None
+        path = []
+        current = 1
+        while current >= 0:
+            path.append(nodes[current])
+            current = previous[current]
+        return list(reversed(path))[1:]
+
+    route = [coordinates[0]]
+    for start, end in zip(coordinates, coordinates[1:]):
+        replacement = detour(start, end)
+        if replacement is None:
+            return None
+        route.extend(replacement)
+    return route
+
+
+def _concentric_orbit_detours(coordinates, center, object_radius, allowed, blocked):
+    """Keep the requested orbit except for radial in/out avoidance arcs.
+
+    A blocked section is replaced by a shorter-radius arc first.  Only if the
+    complete inner arc and both radial transitions are safe do we use it;
+    otherwise the same section is tested on progressively larger circles.
+    This deliberately produces ``outer → inner/outer → outer`` rather than a
+    generic corner-to-corner navigation path.
+    """
+    ring = list(coordinates[:-1])
+    if len(ring) < 3:
+        return None
+    radii = [math.hypot(x - center.x, y - center.y) for x, y in ring]
+    base_radius = sum(radii) / len(radii)
+    if max(abs(radius - base_radius) for radius in radii) > 0.25:
+        return None  # contour or non-centred orbit: retain its existing fallback
+    orientation = sum(
+        ring[index][0] * ring[(index + 1) % len(ring)][1] - ring[(index + 1) % len(ring)][0] * ring[index][1]
+        for index in range(len(ring))
+    )
+    direction = 1 if orientation >= 0 else -1
+    count = len(ring) * 4  # sufficient density for safe radial transitions
+    first_angle = math.atan2(ring[0][1] - center.y, ring[0][0] - center.x)
+
+    def point(angle_index, radius):
+        angle = first_angle + direction * 2 * math.pi * angle_index / count
+        return (center.x + radius * math.cos(angle), center.y + radius * math.sin(angle))
+
+    # A true object buffer is provided by the caller through object_radius:
+    # for a centred circle this is exactly the radius that must not be crossed.
+    object_keepout = Point(center.x, center.y).buffer(object_radius + 2.0)
+
+    def safe_segment(start, end):
+        segment = LineString([start, end])
+        return (allowed is None or allowed.covers(segment)) and not segment.intersects(object_keepout) and not any(segment.intersects(zone) for zone in blocked)
+
+    base = [point(index, base_radius) for index in range(count)]
+    edges = [not safe_segment(base[index], base[(index + 1) % count]) for index in range(count)]
+    # Reserve a few otherwise-valid outer-circle steps before and after a
+    # conflict. They provide room for the radial transition itself instead of
+    # starting that transition directly beside a rectangle corner.
+    original_edges = list(edges)
+    for index, blocked_edge in enumerate(original_edges):
+        if blocked_edge:
+            for offset in range(-3, 4):
+                edges[(index + offset) % count] = True
+    if not any(edges):
+        return coordinates
+    if all(edges):
+        return None
+    # Start just after a safe edge, so each blocked edge run is linear rather
+    # than wrapping around the arbitrary first waypoint.
+    start = next(index for index, blocked_edge in enumerate(edges) if not blocked_edge)
+    ordered_edges = [edges[(start + offset + 1) % count] for offset in range(count)]
+    ordered_base = [base[(start + offset + 1) % count] for offset in range(count)]
+    route = [ordered_base[0]]
+    index = 0
+    while index < count:
+        if not ordered_edges[index]:
+            route.append(ordered_base[(index + 1) % count])
+            index += 1
+            continue
+        end = index
+        while end + 1 < count and ordered_edges[end + 1]:
+            end += 1
+        entry_index, exit_index = index, end + 1
+        entry, exit_point = ordered_base[entry_index], ordered_base[exit_index % count]
+        candidates = [base_radius - step * 0.5 for step in range(1, int((base_radius - object_radius - 2.0) / 0.5) + 1)]
+        candidates += [base_radius + step * 0.5 for step in range(1, 101)]
+        replacement = None
+        for radius in candidates:
+            arc = [point((start + 1 + offset) % count, radius) for offset in range(entry_index, exit_index + 1)]
+            candidate = [entry, arc[0], *arc[1:], exit_point]
+            if all(safe_segment(first, second) for first, second in zip(candidate, candidate[1:])):
+                replacement = candidate[1:]
+                break
+        if replacement is None:
+            return None
+        route.extend(replacement)
+        index = end + 1
+    # Preserve a closed orbit. The final direct edge was chosen as the safe
+    # seam above, so it cannot cut through the zone.
+    return route + [route[0]]
+
+
+def _contour_offset_detours(poi, coordinates, requested_offset, allowed, blocked, boundary_clearance_m, support_spacing_m=None):
+    """Follow a no-fly boundary locally, then return to the original contour."""
+    keepout = poi.buffer(2.0)
+
+    def safe_segment(start, end):
+        segment = LineString([start, end])
+        return (allowed is None or allowed.covers(segment)) and not segment.intersects(keepout) and not any(segment.intersects(zone) for zone in blocked)
+
+    def boundary_arcs(ring, start, end):
+        length = ring.length
+        first_distance, last_distance = ring.project(Point(start)), ring.project(Point(end))
+        vertices = list(ring.coords[:-1])
+        vertex_distances = [(ring.project(Point(point)), point) for point in vertices]
+        arcs = []
+        for direction in (1, -1):
+            span = ((last_distance - first_distance) * direction) % length
+            selected = []
+            for distance, point in vertex_distances:
+                progress = ((distance - first_distance) * direction) % length
+                if 1e-6 < progress < span - 1e-6:
+                    selected.append((progress, point))
+            selected.sort(key=lambda item: item[0])
+            arcs.append([ring.interpolate(first_distance).coords[0], *(point for _progress, point in selected), ring.interpolate(last_distance).coords[0]])
+        return arcs
+
+    def add_corner_support_points(points):
+        """Place one point before and after each genuine boundary corner."""
+        if not support_spacing_m or len(points) < 3:
+            return points
+        result = [points[0]]
+        for previous, corner, following in zip(points, points[1:], points[2:]):
+            incoming = math.dist(previous, corner)
+            outgoing = math.dist(corner, following)
+            if incoming < 0.05 or outgoing < 0.05:
+                result.append(corner)
+                continue
+            distance = min(float(support_spacing_m), incoming / 3, outgoing / 3)
+            before = tuple(corner[axis] + (previous[axis] - corner[axis]) * distance / incoming for axis in (0, 1))
+            after = tuple(corner[axis] + (following[axis] - corner[axis]) * distance / outgoing for axis in (0, 1))
+            result.extend([before, corner, after])
+        result.append(points[-1])
+        return result
+
+    def intersection_distances(segment, zone):
+        """First and last contact with a buffered no-fly boundary."""
+        contact = segment.intersection(zone)
+        points = []
+        def collect(geometry):
+            if geometry.is_empty:
+                return
+            if geometry.geom_type == "Point":
+                points.append(geometry)
+            elif geometry.geom_type == "LineString":
+                points.extend(Point(value) for value in geometry.coords)
+            elif hasattr(geometry, "geoms"):
+                for item in geometry.geoms:
+                    collect(item)
+        collect(contact)
+        distances = sorted(segment.project(point) for point in points)
+        return (distances[0], distances[-1]) if distances else None
+
+    def detour(source_coordinates, zone):
+        segment = LineString(source_coordinates)
+        start, end = source_coordinates[0], source_coordinates[-1]
+        contacts = intersection_distances(segment, zone)
+        if contacts is None:
+            return None
+        # Move the two transition points 0.75 m away from the safety buffer,
+        # keeping them safely on the original contour rather than its edge.
+        margin = min(0.75, segment.length / 4)
+        before = segment.interpolate(max(0.0, contacts[0] - margin)).coords[0]
+        after = segment.interpolate(min(segment.length, contacts[1] + margin)).coords[0]
+        # The no-fly geometry already contains the regular 2 m safety buffer.
+        # This is additional to the regular no-fly safety buffer. Smooth DJI
+        # routes need more reserve than explicitly supported right-angle turns.
+        boundary = zone.buffer(boundary_clearance_m, join_style="mitre").simplify(0.75, preserve_topology=True)
+        if boundary.geom_type != "Polygon":
+            return None
+        ring_coordinates = list(boundary.exterior.coords)
+        ring = LineString(ring_coordinates)
+        arcs = boundary_arcs(ring, before, after)
+        # Prefer the arc nearest the POI only when the actual remaining gap is
+        # at least five metres. Otherwise take the outer arc around the zone.
+        inner_available = poi.distance(zone) >= 5.0
+        arcs.sort(key=lambda arc: sum(Point(point).distance(poi) for point in arc) / len(arc), reverse=not inner_available)
+        arc = add_corner_support_points(arcs[0])
+        candidate = [start, before, *arc, after, end]
+        if all(safe_segment(first, second) for first, second in zip(candidate, candidate[1:])):
+            return candidate[1:]
+        return None
+
+    route, index = [coordinates[0]], 0
+    while index < len(coordinates) - 1:
+        start, end = coordinates[index], coordinates[index + 1]
+        if safe_segment(start, end):
+            route.append(end)
+            index += 1
+            continue
+        last = index
+        while last + 1 < len(coordinates) - 1 and not safe_segment(coordinates[last + 1], coordinates[last + 2]):
+            last += 1
+        source = coordinates[index:last + 2]
+        source_line = LineString(source)
+        zones = [zone for zone in blocked if source_line.intersects(zone)]
+        # Multiple overlapping zones are handled by the safe fallback instead
+        # of inventing an ambiguous sequence of boundary-following arcs.
+        replacement = detour(source, zones[0]) if len(zones) == 1 else None
+        if replacement is None:
+            return None
+        route.extend(replacement)
+        index = last + 1
+    return route
+
+
+def _flight_boundary_detours(coordinates, allowed, blocked):
+    """Replace only out-of-field sections by a short inside boundary arc."""
+    if allowed is None or allowed.geom_type not in {"Polygon", "MultiPolygon"}:
+        return None
+
+    def safe_segment(start, end):
+        segment = LineString([start, end])
+        return allowed.covers(segment) and not any(segment.intersects(zone) for zone in blocked)
+
+    def boundary_arcs(ring, start, end):
+        length = ring.length
+        first, last = ring.project(Point(start)), ring.project(Point(end))
+        vertices = [(ring.project(Point(point)), point) for point in list(ring.coords[:-1])]
+        arcs = []
+        for direction in (1, -1):
+            span = ((last - first) * direction) % length
+            selected = [
+                (((distance - first) * direction) % length, point)
+                for distance, point in vertices
+                if 1e-6 < ((distance - first) * direction) % length < span - 1e-6
+            ]
+            selected.sort(key=lambda item: item[0])
+            arcs.append([ring.interpolate(first).coords[0], *(point for _progress, point in selected), ring.interpolate(last).coords[0]])
+        return arcs
+
+    def detour(source):
+        line = LineString(source)
+        contact = line.intersection(allowed.boundary)
+        points = []
+        def collect(geometry):
+            if geometry.is_empty:
+                return
+            if geometry.geom_type == "Point":
+                points.append(geometry)
+            elif geometry.geom_type == "LineString":
+                points.extend(Point(value) for value in geometry.coords)
+            elif hasattr(geometry, "geoms"):
+                for item in geometry.geoms:
+                    collect(item)
+        collect(contact)
+        distances = sorted(line.project(point) for point in points)
+        if len(distances) < 2:
+            return None
+        margin = min(0.75, line.length / 4)
+        before = line.interpolate(max(0.0, distances[0] - margin)).coords[0]
+        after = line.interpolate(min(line.length, distances[-1] + margin)).coords[0]
+        polygons = [allowed] if allowed.geom_type == "Polygon" else list(allowed.geoms)
+        for polygon in polygons:
+            # Keep the actual flight path half a metre inside the boundary.
+            inset = polygon.buffer(-0.5, join_style="mitre")
+            if inset.is_empty or inset.geom_type != "Polygon":
+                continue
+            ring = LineString(list(inset.exterior.coords))
+            for arc in sorted(boundary_arcs(ring, before, after), key=lambda item: LineString(item).length):
+                candidate = [source[0], before, *arc, after, source[-1]]
+                if all(safe_segment(first, second) for first, second in zip(candidate, candidate[1:])):
+                    return candidate[1:]
+        return None
+
+    route, index = [coordinates[0]], 0
+    while index < len(coordinates) - 1:
+        start, end = coordinates[index], coordinates[index + 1]
+        if safe_segment(start, end):
+            route.append(end)
+            index += 1
+            continue
+        last = index
+        while last + 1 < len(coordinates) - 1 and not safe_segment(coordinates[last + 1], coordinates[last + 2]):
+            last += 1
+        replacement = detour(coordinates[index:last + 2])
+        if replacement is None:
+            return None
+        route.extend(replacement)
+        index = last + 1
+    return route
 
 
 def plan_poi_route(
@@ -123,30 +496,37 @@ def plan_poi_route(
     orbit_clockwise, object_height_m, distance_m, min_altitude_m, max_altitude_m,
     vertical_overlap_pct, sensor_diagonal_mm, focal_length_mm, image_ratio,
     control_point_detail_pct=70, orbit_geometry="Automatisch",
+    no_fly_strategy="adapt", outside_strategy="adapt", safety_margin_m=2.0,
+    contour_boundary_clearance_m=1.5,
+    contour_support_spacing_m=None,
 ):
-    """Create a 2.5D POI plan and reject geometry that leaves the flight area.
+    """Create a 2.5D POI plan, optionally adapting or clipping POI bands.
 
-    No-fly zones are intentionally never crossed.  Automatic detours are not
-    invented here because they would break the constant-distance coverage
-    requirement; the caller receives a precise unsafe-route error instead.
+    ``adapt`` first searches a complete safe orbit at a closer (then farther)
+    offset.  If that is impossible it deliberately falls back to ``skip``:
+    disconnected safe arcs are never connected through a forbidden area.
     """
     if len(poi_area) < 3:
         raise POIPlanningError("Bitte zeichne einen Point of Interest mit mindestens drei Punkten.")
-    if not flight_areas:
+    if not flight_areas and outside_strategy != "allow":
         raise POIPlanningError("Für eine POI-Route wird mindestens ein Flugbereich benötigt.")
     origin_lat = sum(point[0] for point in poi_area) / len(poi_area)
     origin_lon = sum(point[1] for point in poi_area) / len(poi_area)
     poi = _local_geometry(poi_area, origin_lat, origin_lon)
     if not poi.is_valid or poi.area <= 0:
         raise POIPlanningError("Die POI-Geometrie ist ungültig.")
-    allowed = unary_union([_local_geometry(area, origin_lat, origin_lon) for area in flight_areas])
-    blocked = [_local_geometry(area, origin_lat, origin_lon) for area in no_fly_zones]
-    bands, spacing = _height_bands(
-        object_height_m, min_altitude_m, max_altitude_m, distance_m, vertical_overlap_pct,
-        sensor_diagonal_mm, focal_length_mm, image_ratio,
+    if no_fly_strategy not in {"allow", "adapt", "skip"}:
+        raise POIPlanningError("Die POI-Sperrgebietsstrategie ist ungültig.")
+    if outside_strategy not in {"allow", "adapt", "skip"}:
+        raise POIPlanningError("Die POI-Flugbereichsstrategie ist ungültig.")
+    allowed = None if outside_strategy == "allow" else unary_union(
+        [_local_geometry(area, origin_lat, origin_lon) for area in flight_areas]
     )
+    blocked = [] if no_fly_strategy == "allow" else [
+        _local_geometry(area, origin_lat, origin_lon).buffer(safety_margin_m)
+        for area in no_fly_zones
+    ]
     center = poi.centroid
-    levels = []
     orbit = capture_type == "Objekt umrunden"
     if orbit:
         circular, circle_center, circle_radius = _is_nearly_circular(poi)
@@ -155,6 +535,15 @@ def plan_poi_route(
         use_center_circle = orbit_geometry == "Kreis um Mittelpunkt" or (
             orbit_geometry == "Automatisch" and circular
         )
+        def orbit_coordinates(offset_m):
+            if use_center_circle:
+                return _safe_circle_coordinates(circle_center, circle_radius, offset_m, control_point_detail_pct)
+            detail = min(100.0, max(0.0, float(control_point_detail_pct))) / 100.0
+            return _ring_coordinates(
+                poi.buffer(offset_m, join_style="round", resolution=2 + round(6 * detail))
+                .simplify(1.8 - 1.6 * detail, preserve_topology=True)
+            )
+
         if use_center_circle:
             # For arbitrary polygons the farthest contour vertex defines the
             # smallest safe centre-circle. Every polygon edge remains inside
@@ -165,15 +554,11 @@ def plan_poi_route(
                     math.hypot(x - circle_center.x, y - circle_center.y)
                     for x, y in poi.exterior.coords[:-1]
                 )
-            coordinates = _safe_circle_coordinates(circle_center, circle_radius, distance_m, control_point_detail_pct)
+            coordinates = orbit_coordinates(distance_m)
         else:
             # Polygon edges stay exact; rounded corners receive only the
             # handful of steering points needed for a safe curve.
-            detail = min(100.0, max(0.0, float(control_point_detail_pct))) / 100.0
-            coordinates = _ring_coordinates(
-                poi.buffer(distance_m, join_style="round", resolution=2 + round(6 * detail))
-                .simplify(1.8 - 1.6 * detail, preserve_topology=True)
-            )
+            coordinates = orbit_coordinates(distance_m)
         if len(coordinates) < 3:
             raise POIPlanningError("Die Umlaufbahn konnte nicht aus dem Point of Interest erzeugt werden.")
         # A closed ring needs a repeated first point to produce a complete loop.
@@ -192,22 +577,83 @@ def plan_poi_route(
             (center.x + normal[0] * line_normal + tangent[0] * min(tangent_values), center.y + normal[1] * line_normal + tangent[1] * min(tangent_values)),
             (center.x + normal[0] * line_normal + tangent[0] * max(tangent_values), center.y + normal[1] * line_normal + tangent[1] * max(tangent_values)),
         ]
+    # First retain the requested offset.  For "Anpassen" use a whole safe
+    # orbit/pass if possible; this preserves complete coverage and makes its
+    # overlap calculation unambiguous.  Otherwise clipping below is the safe
+    # fallback requested by the UI.
+    effective_distance = distance_m
+    base_line = LineString(coordinates)
+    if no_fly_strategy == "adapt" and blocked and any(base_line.intersects(zone) for zone in blocked):
+        local_route = (
+            _concentric_orbit_detours(coordinates, circle_center, circle_radius, allowed, blocked)
+            if orbit and use_center_circle else
+            _contour_offset_detours(poi, coordinates, distance_m, allowed, blocked, contour_boundary_clearance_m, contour_support_spacing_m)
+            if orbit else _local_detour_route(coordinates, allowed, blocked, poi.buffer(2.0))
+        )
+        if local_route is not None:
+            coordinates = local_route
+            base_line = LineString(coordinates)
+            # A locally inward detour has a smaller image footprint. Base the
+            # height-band spacing on that worst case, never on the original
+            # wider distance.
+            effective_distance = min(distance_m, min(Point(point).distance(poi) for point in coordinates))
+    if outside_strategy == "adapt" and allowed is not None and not allowed.covers(base_line):
+        field_route = _flight_boundary_detours(coordinates, allowed, blocked)
+        if field_route is not None:
+            coordinates = field_route
+            base_line = LineString(coordinates)
+    # A global radius change is allowed only as a no-fly fallback. Flight-area
+    # adaptation must remain local along the field boundary above.
+    if no_fly_strategy == "adapt" and not _inside_allowed(base_line, allowed, blocked):
+        candidates = [max(2.0, distance_m - step * 0.5) for step in range(1, int(max(0, distance_m - 2.0) / 0.5) + 1)]
+        if no_fly_strategy == "adapt":
+            candidates += [distance_m + step * 0.5 for step in range(1, 101)]
+        for candidate_distance in candidates:
+            if orbit:
+                candidate = orbit_coordinates(candidate_distance)
+                if orbit_clockwise:
+                    candidate = list(reversed(candidate))
+                candidate = candidate + [candidate[0]]
+            else:
+                # A facade can only move closer for a bounded flight area.
+                shift = candidate_distance - distance_m
+                candidate = [(x + normal[0] * shift, y + normal[1] * shift) for x, y in coordinates]
+            if _inside_allowed(LineString(candidate), allowed, blocked):
+                coordinates, effective_distance, base_line = candidate, candidate_distance, LineString(candidate)
+                break
+
+    bands, spacing = _height_bands(
+        object_height_m, min_altitude_m, max_altitude_m, effective_distance, vertical_overlap_pct,
+        sensor_diagonal_mm, focal_length_mm, image_ratio,
+    )
+    levels = []
+    separate_before = []
+    must_clip = not _inside_allowed(base_line, allowed, blocked)
     for level_index, (target_height, altitude) in enumerate(bands, 1):
-        band_coordinates = coordinates if orbit or level_index % 2 else list(reversed(coordinates))
-        line = LineString(band_coordinates)
-        if not _inside_allowed(line, allowed, blocked):
+        ordered = coordinates if orbit or level_index % 2 else list(reversed(coordinates))
+        parts = [ordered] if not must_clip else _safe_line_parts(LineString(ordered), allowed, blocked)
+        if not parts:
             raise POIPlanningError(
-                f"Höhenebene {level_index} verlässt den Flugbereich oder schneidet ein Sperrgebiet. "
-                "Automatische Umfliegungen werden noch nicht erzeugt."
+                f"Höhenebene {level_index} hat außerhalb der Sperr- und Flugbereiche keine sichere Aufnahmebahn."
             )
-        waypoints = []
-        for x, y in band_coordinates:
-            lat, lon = _to_geographic(x, y, origin_lat, origin_lon)
-            target_x, target_y = (center.x, center.y) if orbit else (x - normal[0] * distance_m, y - normal[1] * distance_m)
-            yaw = (math.degrees(math.atan2(target_x - x, target_y - y)) + 360) % 360
-            pitch = math.degrees(math.atan2(target_height - altitude, distance_m))
-            waypoints.append(POIWaypoint(lat, lon, altitude, max(-90.0, min(0.0, pitch)), yaw, level_index, "capture"))
-        levels.append(tuple(waypoints))
+        # Alternate both direction and arc order. This produces the desired
+        # bottom-to-top / top-to-bottom zig-zag for a half orbit.
+        if level_index % 2 == 0:
+            parts = [list(reversed(part)) for part in reversed(parts)]
+        for part_index, band_coordinates in enumerate(parts):
+            if len(band_coordinates) < 2:
+                continue
+            waypoints = []
+            for x, y in band_coordinates:
+                lat, lon = _to_geographic(x, y, origin_lat, origin_lon)
+                target_x, target_y = (center.x, center.y) if orbit else (x - normal[0] * effective_distance, y - normal[1] * effective_distance)
+                yaw = (math.degrees(math.atan2(target_x - x, target_y - y)) + 360) % 360
+                horizontal_distance = math.hypot(target_x - x, target_y - y)
+                pitch = math.degrees(math.atan2(target_height - altitude, horizontal_distance))
+                waypoints.append(POIWaypoint(lat, lon, altitude, max(-90.0, min(0.0, pitch)), yaw, level_index, "capture"))
+            if len(waypoints) >= 2:
+                levels.append(tuple(waypoints))
+                separate_before.append(bool(part_index))
 
     # Facade bands end at the top edge and therefore do not cover a roof. An
     # orbit can add one pass above the object, but never violates the configured
@@ -217,23 +663,23 @@ def plan_poi_route(
     if orbit and max_altitude_m > object_height_m + 1e-6:
         roof_altitude = min(max_altitude_m, object_height_m + max(2.0, spacing))
         roof_level_index = len(levels) + 1
-        roof_line = LineString(coordinates)
-        if not _inside_allowed(roof_line, allowed, blocked):
-            raise POIPlanningError(
-                "Die Dach-Höhenebene verlässt den Flugbereich oder schneidet ein Sperrgebiet. "
-                "Automatische Umfliegungen werden noch nicht erzeugt."
-            )
-        roof_waypoints = []
-        for x, y in coordinates:
-            lat, lon = _to_geographic(x, y, origin_lat, origin_lon)
-            horizontal_distance = math.hypot(center.x - x, center.y - y)
-            yaw = (math.degrees(math.atan2(center.x - x, center.y - y)) + 360) % 360
-            pitch = -math.degrees(math.atan2(roof_altitude - object_height_m, horizontal_distance))
-            roof_waypoints.append(POIWaypoint(
-                lat, lon, roof_altitude, max(-90.0, min(0.0, pitch)), yaw, roof_level_index, "roof_capture"
-            ))
-        levels.append(tuple(roof_waypoints))
-    return POIRoutePlan(tuple(levels), spacing)
+        roof_parts = [coordinates] if not must_clip else _safe_line_parts(LineString(coordinates), allowed, blocked)
+        if not roof_parts:
+            raise POIPlanningError("Die Dach-Höhenebene hat keine sichere Aufnahmebahn.")
+        for roof_part_index, roof_coordinates in enumerate(roof_parts):
+            roof_waypoints = []
+            for x, y in roof_coordinates:
+                lat, lon = _to_geographic(x, y, origin_lat, origin_lon)
+                horizontal_distance = math.hypot(center.x - x, center.y - y)
+                yaw = (math.degrees(math.atan2(center.x - x, center.y - y)) + 360) % 360
+                pitch = -math.degrees(math.atan2(roof_altitude - object_height_m, horizontal_distance))
+                roof_waypoints.append(POIWaypoint(
+                    lat, lon, roof_altitude, max(-90.0, min(0.0, pitch)), yaw, roof_level_index, "roof_capture"
+                ))
+            if len(roof_waypoints) >= 2:
+                levels.append(tuple(roof_waypoints))
+                separate_before.append(bool(roof_part_index))
+    return POIRoutePlan(tuple(levels), spacing, tuple(separate_before))
 
 
 __all__ = ["POIPlanningError", "POIRoutePlan", "POIWaypoint", "plan_poi_route"]
