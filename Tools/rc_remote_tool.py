@@ -10,6 +10,7 @@ import json
 import sys
 import tempfile
 import xml.dom.minidom
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
@@ -36,6 +37,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QTreeWidget,
     QTreeWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -64,14 +66,34 @@ function showMission(route,label){
 
 
 class KmzInspector(QDialog):
-    """Show KMZ archive contents and prettified XML/WPML files."""
+    """Show archive files, XML structure, and raw KMZ source for debugging."""
 
     def __init__(self, path: Path, parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle(f"KMZ-Debugger – {path.name}")
         self.resize(980, 650)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("KMZ-Dateien sind ZIP-Archive. XML/WPML wird hier formatiert angezeigt; Binärdateien werden nicht verändert."))
+        layout.addWidget(QLabel("KMZ-Dateien sind ZIP-Archive. Die Strukturansicht zeigt alle XML-Keys und Values; bei einem Wegpunkt erscheinen dessen Einstellungen gemeinsam rechts."))
+        tabs = QTabWidget()
+
+        structure_page = QWidget()
+        structure_layout = QVBoxLayout(structure_page)
+        structure_split = QSplitter()
+        self.structure = QTreeWidget()
+        self.structure.setHeaderLabels(["KMZ-/XML-Struktur"])
+        self.properties = QTableWidget(0, 2)
+        self.properties.setHorizontalHeaderLabels(["Key", "Value"])
+        self.properties.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.properties.setAlternatingRowColors(True)
+        self.properties.horizontalHeader().setStretchLastSection(True)
+        structure_split.addWidget(self.structure)
+        structure_split.addWidget(self.properties)
+        structure_split.setStretchFactor(1, 1)
+        structure_layout.addWidget(structure_split)
+        tabs.addTab(structure_page, "Struktur & Einstellungen")
+
+        raw_page = QWidget()
+        raw_layout = QVBoxLayout(raw_page)
         split = QSplitter()
         self.files = QTreeWidget()
         self.files.setHeaderLabels(["Archivdatei", "Größe"])
@@ -80,7 +102,9 @@ class KmzInspector(QDialog):
         split.addWidget(self.files)
         split.addWidget(self.text)
         split.setStretchFactor(1, 1)
-        layout.addWidget(split, 1)
+        raw_layout.addWidget(split)
+        tabs.addTab(raw_page, "Archiv & Rohdatei")
+        layout.addWidget(tabs, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -89,17 +113,85 @@ class KmzInspector(QDialog):
             with zipfile.ZipFile(path) as archive:
                 for info in archive.infolist():
                     self._contents[info.filename] = archive.read(info.filename)
-                    QTreeWidgetItem(self.files, [info.filename, f"{info.file_size:,} B"])
+                    self._add_archive_file(info.filename, info.file_size)
+                    self._add_xml_structure(info.filename, self._contents[info.filename])
         except (OSError, zipfile.BadZipFile) as error:
             self.text.setPlainText(f"KMZ konnte nicht als ZIP-Archiv gelesen werden:\n{error}")
         self.files.currentItemChanged.connect(self._show_file)
+        self.structure.currentItemChanged.connect(self._show_properties)
         if self.files.topLevelItemCount():
             self.files.setCurrentItem(self.files.topLevelItem(0))
+        self.structure.expandToDepth(2)
+
+    @staticmethod
+    def _tag(value: str) -> str:
+        return value.rsplit("}", 1)[-1]
+
+    def _add_archive_file(self, name: str, size: int) -> None:
+        parent: QTreeWidgetItem | QTreeWidget = self.files
+        parts = Path(name).parts
+        for index, part in enumerate(parts):
+            is_file = index == len(parts) - 1
+            child = next((parent.child(row) for row in range(parent.childCount()) if parent.child(row).text(0) == part), None) if isinstance(parent, QTreeWidgetItem) else next((parent.topLevelItem(row) for row in range(parent.topLevelItemCount()) if parent.topLevelItem(row).text(0) == part), None)
+            if child is None:
+                child = QTreeWidgetItem(parent, [part, f"{size:,} B" if is_file else ""])
+            parent = child
+        parent.setData(0, Qt.ItemDataRole.UserRole, name)
+
+    def _add_xml_structure(self, name: str, data: bytes) -> None:
+        if not name.lower().endswith((".kml", ".wpml", ".xml")):
+            return
+        root_item = QTreeWidgetItem(self.structure, [name])
+        root_item.setData(0, Qt.ItemDataRole.UserRole, [("Archivdatei", name), ("Größe", f"{len(data):,} B")])
+        try:
+            self._add_element(root_item, ET.fromstring(data), ())
+        except ET.ParseError as error:
+            QTreeWidgetItem(root_item, [f"XML konnte nicht gelesen werden: {error}"])
+
+    def _add_element(self, parent: QTreeWidgetItem, element: ET.Element, path: tuple[str, ...]) -> None:
+        tag = self._tag(element.tag)
+        index = next((node.text.strip() for node in element.iter() if self._tag(node.tag) == "index" and node.text and node.text.strip()), None)
+        label = f"Wegpunkt {index} · {tag}" if tag == "Placemark" and index is not None else tag
+        item = QTreeWidgetItem(parent, [label])
+        item.setData(0, Qt.ItemDataRole.UserRole, self._element_properties(element, path + (tag,)))
+        for child in element:
+            self._add_element(item, child, path + (tag,))
+
+    def _element_properties(self, element: ET.Element, path: tuple[str, ...]) -> list[tuple[str, str]]:
+        properties = [("Element", self._tag(element.tag))]
+        properties.extend((f"@{self._tag(key)}", value) for key, value in element.attrib.items())
+        text = (element.text or "").strip()
+        if text:
+            properties.append(("Wert", text))
+        # A Placemark is a waypoint in DJI WPML.  Its leaf nodes are flattened
+        # here so a single click exposes all waypoint-specific settings.
+        if self._tag(element.tag) == "Placemark":
+            for leaf in element.iter():
+                if leaf is element or list(leaf) or not (leaf.text or "").strip():
+                    continue
+                properties.append((self._tag(leaf.tag), (leaf.text or "").strip()))
+                properties.extend((f"{self._tag(leaf.tag)}.@{self._tag(key)}", value) for key, value in leaf.attrib.items())
+        properties.append(("Unterelemente", str(len(element))))
+        return properties
+
+    def _show_properties(self, item: QTreeWidgetItem | None) -> None:
+        values = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        self.properties.setRowCount(0)
+        if not values:
+            return
+        for key, value in values:
+            row = self.properties.rowCount()
+            self.properties.insertRow(row)
+            self.properties.setItem(row, 0, QTableWidgetItem(str(key)))
+            self.properties.setItem(row, 1, QTableWidgetItem(str(value)))
 
     def _show_file(self, item: QTreeWidgetItem | None) -> None:
         if item is None:
             return
-        name = item.text(0)
+        name = item.data(0, Qt.ItemDataRole.UserRole)
+        if not name:
+            self.text.setPlainText("Ordner – bitte eine Datei auswählen.")
+            return
         data = self._contents[name]
         if name.lower().endswith((".kml", ".wpml", ".xml")):
             try:

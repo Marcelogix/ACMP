@@ -216,7 +216,16 @@ foreach ($device in @($computer.Items())) {
             if ($file.IsFolder -or $file.Name -notmatch '(?i)\.kmz$') { continue }
             $size = $null
             try { $size = [int64]$file.Size } catch { }
-            $modified = [string]$file.ModifyDate
+            # ``ModifyDate`` is empty for many MTP providers.  The Shell
+            # property system exposes the actual device timestamp separately.
+            $modified = $null
+            try { $modified = $file.ExtendedProperty('System.DateModified') } catch { }
+            if ($null -eq $modified -or [string]::IsNullOrWhiteSpace([string]$modified)) {
+                try { $modified = $file.ExtendedProperty('System.ItemDate') } catch { }
+            }
+            if ($modified -is [datetime]) { $modified = $modified.ToString('yyyy-MM-dd HH:mm:ss') }
+            elseif ($null -ne $modified) { $modified = [string]$modified }
+            if ([string]::IsNullOrWhiteSpace($modified)) { $modified = [string]$file.ModifyDate }
             # The MTP provider uses the OLE zero-date when it has no timestamp.
             if ($modified -match '(^|/)12/30/1899|(^|/)30\.12\.1899') { $modified = $null }
             $result += [PSCustomObject]@{
