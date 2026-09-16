@@ -5,7 +5,7 @@ import zipfile
 from pathlib import Path
 from acmp.i18n import canonical_ui_text
 
-def build_dji_kmz(destination: Path, route, altitude_m, speed_mps, gimbal_pitch, photo_mode, photo_distance_m, route_mode, finish_action, signal_loss_action, waypoint_speeds=None, use_point_gimbal_pitch=True, waypoint_altitudes=None, waypoint_gimbal_pitches=None):
+def build_dji_kmz(destination: Path, route, altitude_m, speed_mps, gimbal_pitch, photo_mode, photo_distance_m, route_mode, finish_action, signal_loss_action, waypoint_speeds=None, use_point_gimbal_pitch=True, waypoint_altitudes=None, waypoint_gimbal_pitches=None, waypoint_headings=None):
     if len(route) < 2: raise ValueError("Mindestens zwei Wegpunkte werden benötigt.")
     photo_mode=canonical_ui_text(photo_mode); route_mode=canonical_ui_text(route_mode); stamp=int(time.time()*1000)
     turn="toPointAndStopWithDiscontinuityCurvature" if route_mode=="WPML gerade / Punktstopp (nicht garantiert)" else "toPointAndPassWithContinuityCurvature"
@@ -14,6 +14,7 @@ def build_dji_kmz(destination: Path, route, altitude_m, speed_mps, gimbal_pitch,
     if len(waypoint_speeds)!=len(route): raise ValueError("Für jeden Wegpunkt muss eine Geschwindigkeit vorhanden sein.")
     if waypoint_altitudes is not None and len(waypoint_altitudes) != len(route): raise ValueError("Für jeden Wegpunkt muss eine Höhe vorhanden sein.")
     if waypoint_gimbal_pitches is not None and len(waypoint_gimbal_pitches) != len(route): raise ValueError("Für jeden Wegpunkt muss eine Gimbal-Neigung vorhanden sein.")
+    if waypoint_headings is not None and len(waypoint_headings) != len(route): raise ValueError("Für jeden Wegpunkt muss eine Blickrichtung vorhanden sein.")
     marks=[]
     for i,(lat,lon) in enumerate(route):
         action=""
@@ -39,7 +40,18 @@ def build_dji_kmz(destination: Path, route, altitude_m, speed_mps, gimbal_pitch,
                 "<wpml:payloadPositionIndex>0</wpml:payloadPositionIndex></wpml:actionActuatorFuncParam></wpml:action></wpml:actionGroup>"
             )
         waypoint_altitude = waypoint_altitudes[i] if waypoint_altitudes is not None else altitude_m
-        marks.append(f"<Placemark><Point><coordinates>{lon:.8f},{lat:.8f}</coordinates></Point><wpml:index>{i}</wpml:index><wpml:executeHeight>{waypoint_altitude:.1f}</wpml:executeHeight><wpml:waypointSpeed>{waypoint_speed:.1f}</wpml:waypointSpeed><wpml:waypointTurnParam><wpml:waypointTurnMode>{turn}</wpml:waypointTurnMode><wpml:waypointTurnDampingDist>0</wpml:waypointTurnDampingDist></wpml:waypointTurnParam>{gimbal_action}{action}</Placemark>")
+        heading_param = ""
+        if waypoint_headings is not None:
+            # ``smoothTransition`` continually interpolates aircraft yaw to
+            # the next POI-facing heading, so a facade pass flies sideways
+            # instead of following its line of waypoints.
+            heading = (float(waypoint_headings[i]) + 180) % 360 - 180
+            heading_param = (
+                "<wpml:waypointHeadingParam><wpml:waypointHeadingMode>smoothTransition</wpml:waypointHeadingMode>"
+                f"<wpml:waypointHeadingAngle>{heading:.1f}</wpml:waypointHeadingAngle>"
+                "<wpml:waypointHeadingPathMode>followBadArc</wpml:waypointHeadingPathMode></wpml:waypointHeadingParam>"
+            )
+        marks.append(f"<Placemark><Point><coordinates>{lon:.8f},{lat:.8f}</coordinates></Point><wpml:index>{i}</wpml:index><wpml:executeHeight>{waypoint_altitude:.1f}</wpml:executeHeight><wpml:waypointSpeed>{waypoint_speed:.1f}</wpml:waypointSpeed>{heading_param}<wpml:waypointTurnParam><wpml:waypointTurnMode>{turn}</wpml:waypointTurnMode><wpml:waypointTurnDampingDist>0</wpml:waypointTurnDampingDist></wpml:waypointTurnParam>{gimbal_action}{action}</Placemark>")
     interval=""
     if photo_mode=="Foto nach Distanzintervall": interval=f"<wpml:actionGroup><wpml:actionGroupId>0</wpml:actionGroupId><wpml:actionGroupStartIndex>0</wpml:actionGroupStartIndex><wpml:actionGroupEndIndex>{len(route)-1}</wpml:actionGroupEndIndex><wpml:actionGroupMode>sequence</wpml:actionGroupMode><wpml:actionTrigger><wpml:actionTriggerType>multipleDistance</wpml:actionTriggerType><wpml:actionTriggerParam>{photo_distance_m:.1f}</wpml:actionTriggerParam></wpml:actionTrigger><wpml:action><wpml:actionId>0</wpml:actionId><wpml:actionActuatorFunc>takePhoto</wpml:actionActuatorFunc><wpml:actionActuatorFuncParam><wpml:payloadPositionIndex>0</wpml:payloadPositionIndex></wpml:actionActuatorFuncParam></wpml:action></wpml:actionGroup>"
     ns='xmlns="http://www.opengis.net/kml/2.2" xmlns:wpml="http://www.dji.com/wpmz/1.0.2"'
