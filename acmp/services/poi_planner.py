@@ -1,7 +1,8 @@
 """Independent route planner for point-of-interest capture missions.
 
-The terrain lawnmower planner deliberately does not appear here.  POI routes
-are generated as height bands around an object or parallel facade passes.
+POI routes are generated independently as height bands around an object or
+parallel facade passes. The optional roof scan reuses only the proven generic
+lawnmower geometry helper for its horizontal raster.
 """
 from __future__ import annotations
 
@@ -10,6 +11,8 @@ import math
 
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
+
+from acmp.services.route_planner import add_overshoot_turns, generate_lawnmower_route, optimal_direction_deg
 
 
 class POIPlanningError(ValueError):
@@ -499,6 +502,9 @@ def plan_poi_route(
     no_fly_strategy="adapt", outside_strategy="adapt", safety_margin_m=2.0,
     contour_boundary_clearance_m=1.5,
     contour_support_spacing_m=None,
+    top_down_roof_scan=False,
+    top_down_overshoot_m=0.0,
+    reduced_overshoot=False,
 ):
     """Create a 2.5D POI plan, optionally adapting or clipping POI bands.
 
@@ -679,6 +685,49 @@ def plan_poi_route(
             if len(roof_waypoints) >= 2:
                 levels.append(tuple(roof_waypoints))
                 separate_before.append(bool(roof_part_index))
+    if top_down_roof_scan and max_altitude_m >= object_height_m + distance_m:
+        # Reuse the established terrain scan path generator: alternating rows,
+        # proper U-turns and optional exterior overshoot points. It remains a
+        # single POI level so normal mission-limit splitting can keep it whole.
+        roof_altitude = object_height_m + distance_m
+        footprint = _vertical_footprint_m(distance_m, sensor_diagonal_mm, focal_length_mm, image_ratio)
+        spacing = footprint * (1 - vertical_overlap_pct / 100)
+        raw_no_fly = no_fly_zones if no_fly_strategy != "allow" else []
+        terrain_route = generate_lawnmower_route(
+            poi_area, spacing, optimal_direction_deg(poi_area), raw_no_fly, allow_outside=True,
+        )
+        overshot_route, _unused_overshoot_paths = add_overshoot_turns(
+            terrain_route, top_down_overshoot_m, reduced_overshoot,
+        )
+        def local_line(route):
+            return LineString([
+                ((lon - origin_lon) * 111_319.49 * math.cos(math.radians(origin_lat)),
+                 (lat - origin_lat) * 111_132.92)
+                for lat, lon in route
+            ])
+        # Overshoot is optional safety/turning room, never authority to leave
+        # the configured flight area or enter a no-fly zone. Fall back to the
+        # contained terrain route when the exterior turn cannot be flown.
+        if not _inside_allowed(local_line(overshot_route), allowed, blocked):
+            terrain_route = generate_lawnmower_route(
+                poi_area, spacing, optimal_direction_deg(poi_area), raw_no_fly, allow_outside=False,
+            )
+        if len(terrain_route) < 2 or not _inside_allowed(local_line(terrain_route), allowed, blocked):
+            raise POIPlanningError("Für den Top-Down-Dachscan konnte keine sichere Rasterroute erzeugt werden.")
+        roof_waypoints = []
+        route = overshot_route if _inside_allowed(local_line(overshot_route), allowed, blocked) else terrain_route
+        for index, (lat, lon) in enumerate(route):
+            target = route[index + 1] if index + 1 < len(route) else route[index - 1]
+            yaw = (math.degrees(math.atan2(target[1] - lon, target[0] - lat)) + 360) % 360
+            roof_waypoints.append(POIWaypoint(
+                lat, lon, roof_altitude, -90.0, yaw, len(levels) + 1, "roof_topdown"
+            ))
+        levels.append(tuple(roof_waypoints))
+        separate_before.append(False)
+    elif top_down_roof_scan:
+        raise POIPlanningError(
+            "Für den Top-Down-Dachscan muss die Maximalflughöhe mindestens Objekthöhe plus Objektabstand erreichen."
+        )
     return POIRoutePlan(tuple(levels), spacing, tuple(separate_before))
 
 

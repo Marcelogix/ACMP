@@ -122,6 +122,8 @@ UI_EN = {
     "Überflug außerhalb des Flugbereichs:": "Overshoot outside flight area:", "Minimale Intervalldauer:": "Minimum interval duration:",
     "Aufnahmeart:": "Capture type:", "Fassadenrichtung:": "Facade direction:", "Umlaufrichtung:": "Orbit direction:",
     "Steuerpunktdichte:": "Control-point density:", "Objekthöhe:": "Object height:", "Objektabstand:": "Object distance:",
+    "Dachfläche von oben scannen": "Scan roof from above",
+    "Sparmodus": "Economy mode", "An POI-Bahn anhängen": "Append to POI pass",
     "Mindestflughöhe:": "Minimum flight altitude:", "Maximalflughöhe:": "Maximum flight altitude:",
     "Überlappung zwischen Höhenbahnen:": "Overlap between height bands:", "Überlappung entlang Flugbahn:": "Overlap along flight path:",
     "Bevorzugte Fluggeschwindigkeit:": "Preferred flight speed:", "POI-Aufnahme": "POI capture", "POI-Höhenebenen": "POI height bands",
@@ -185,7 +187,7 @@ def canonical_ui_text(value: str) -> str:
 MAP_HTML = r"""<!DOCTYPE html>
 <html lang="de"><head><meta charset="utf-8">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<style>html,body,#map{height:100%;width:100%;margin:0}.leaflet-container{font-family:Segoe UI,Arial,sans-serif}.acmp-3d-toggle{position:absolute;z-index:1200;bottom:24px;right:12px;border:1px solid #8b5cf6;border-radius:6px;background:#fff;color:#4c1d95;padding:7px 10px;font:700 12px Segoe UI,Arial;box-shadow:0 1px 5px #555;cursor:pointer}.acmp-3d-toggle:hover{background:#f5f3ff}.acmp-3d-view{position:absolute;inset:0;z-index:1100;background:linear-gradient(#dcecf6,#f8fafc 58%,#cbd5e1);display:none;overflow:hidden}.acmp-3d-hint{position:absolute;z-index:1;bottom:16px;left:16px;color:#172b4d;background:rgba(255,255,255,.9);border:1px solid #aeb8c4;border-radius:6px;padding:7px 9px;font:12px Segoe UI,Arial;pointer-events:none}.acmp-3d-scale{position:absolute;z-index:1;top:12px;right:12px;color:#172b4d;background:rgba(255,255,255,.93);border:1px solid #aeb8c4;border-radius:6px;padding:7px 9px;font:12px Segoe UI,Arial}.acmp-3d-scale input{width:120px;vertical-align:middle}</style>
+<style>html,body,#map{height:100%;width:100%;margin:0}.leaflet-container{font-family:Segoe UI,Arial,sans-serif}.acmp-3d-toggle{position:absolute;z-index:1200;bottom:24px;right:12px;border:1px solid #8b5cf6;border-radius:6px;background:#fff;color:#4c1d95;padding:7px 10px;font:700 12px Segoe UI,Arial;box-shadow:0 1px 5px #555;cursor:pointer}.acmp-3d-toggle:hover{background:#f5f3ff}.acmp-3d-view{position:absolute;inset:0;z-index:1100;background:linear-gradient(#dcecf6,#f8fafc 58%,#cbd5e1);display:none;overflow:hidden}.acmp-3d-hint{position:absolute;z-index:1;bottom:16px;left:16px;color:#172b4d;background:rgba(255,255,255,.9);border:1px solid #aeb8c4;border-radius:6px;padding:7px 9px;font:12px Segoe UI,Arial;pointer-events:none}.acmp-3d-scale{position:absolute;z-index:1;top:12px;right:12px;color:#172b4d;background:rgba(255,255,255,.93);border:1px solid #aeb8c4;border-radius:6px;padding:7px 9px;font:12px Segoe UI,Arial}.acmp-3d-scale input{width:120px;vertical-align:middle}.acmp-3d-scale select{margin-top:5px;width:100%;font:12px Segoe UI,Arial}</style>
 </head><body><div id="map"></div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
@@ -210,7 +212,7 @@ L.control.scale({position:'bottomleft', metric:true, imperial:false, maxWidth:14
 let missionLegend=null, missionLegendCollapsed=false, poiLegendCollapsed=false, mapLanguage='de';
 const mapTranslations={
   'Geschätzte DJI-Flugbahn (Centripetal-Catmull-Rom-Näherung)':'Estimated DJI flight path (centripetal Catmull-Rom approximation)',
-  'POI-Höhenebenen':'POI height bands', 'Dachbahn':'Roof pass', 'Ebene':'Level', 'Flughöhe':'Flight altitude',
+  'POI-Höhenebenen':'POI height bands', 'Dachbahn':'Roof pass', 'Dachscan (Top-Down)':'Roof scan (top-down)', 'Ebene':'Level', 'Flughöhe':'Flight altitude',
   'Blickrichtung':'View direction', 'Steuerpunkt':'Control point', 'Referenz':'Reference',
   'gemeinsame Lage aller Höhenebenen':'shared position of all height bands'
 };
@@ -231,10 +233,11 @@ let importedMissionLayer = L.layerGroup().addTo(map);
 const importedMissionLayers = new Map();
 let overshootZoneLayer = L.layerGroup().addTo(map);
 let geozoneConflictLayer = L.layerGroup().addTo(map);
-let poi3dData=null, poi3dActive=false, poi3dScene=null, poi3dRenderer=null, poi3dCamera=null, poi3dControls=null, poi3dRenderToken=0, poi3dMarkerScale=.7;
-const poi3dContainer=document.createElement('div'); poi3dContainer.className='acmp-3d-view'; poi3dContainer.innerHTML='<div class="acmp-3d-scale">Markierungsgröße <input id="acmp-3d-scale" type="range" min="35" max="140" value="70"> <span id="acmp-3d-scale-value">70%</span></div><div class="acmp-3d-hint">Linke Maustaste: drehen · Mausrad: zoomen · rechte Maustaste: verschieben<hr style="border:0;border-top:1px solid #cbd5e1;margin:6px 0"><b>Lokale Achsen</b> · Ursprung: WP 1<br><span style="color:#dc2626">X</span> Ost · <span style="color:#16a34a">Y</span> Höhe · <span style="color:#2563eb">−Z</span> Nord</div>'; document.body.appendChild(poi3dContainer);
+let poi3dData=null, poi3dActive=false, poi3dScene=null, poi3dRenderer=null, poi3dCamera=null, poi3dControls=null, poi3dRenderToken=0, poi3dMarkerScale=.7, poi3dGroundMode='current', activeBase='normal';
+const poi3dContainer=document.createElement('div'); poi3dContainer.className='acmp-3d-view'; poi3dContainer.innerHTML='<div class="acmp-3d-scale">Markierungsgröße <input id="acmp-3d-scale" type="range" min="35" max="140" value="70"> <span id="acmp-3d-scale-value">70%</span><br><select id="acmp-3d-ground" title="Kartenunterlage auf dem Boden"><option value="current">Bodenkarte: aktuell</option><option value="normal">Bodenkarte: Karte</option><option value="satellite">Bodenkarte: Satellit</option><option value="off">Bodenkarte: aus</option></select></div><div class="acmp-3d-hint">Linke Maustaste: drehen · Mausrad: zoomen · rechte Maustaste: verschieben<hr style="border:0;border-top:1px solid #cbd5e1;margin:6px 0"><b>Lokale Achsen</b> · Ursprung: WP 1<br><span style="color:#dc2626">X</span> Ost · <span style="color:#16a34a">Y</span> Höhe · <span style="color:#2563eb">−Z</span> Nord<br><span id="acmp-3d-map-attribution" style="display:none;color:#475569"></span></div>'; document.body.appendChild(poi3dContainer);
 const poi3dToggle=document.createElement('button'); poi3dToggle.className='acmp-3d-toggle'; poi3dToggle.textContent='3D-Ansicht'; poi3dToggle.style.display='none'; document.body.appendChild(poi3dToggle);
 document.getElementById('acmp-3d-scale').oninput=event=>{poi3dMarkerScale=Number(event.target.value)/100;document.getElementById('acmp-3d-scale-value').textContent=`${event.target.value}%`;if(poi3dActive)buildPoi3D();};
+document.getElementById('acmp-3d-ground').onchange=event=>{poi3dGroundMode=event.target.value;if(poi3dActive)buildPoi3D();};
 function emitFlightAreas(){ console.log('ACMP_FLIGHT_AREAS:' + JSON.stringify(flightAreas)); }
 function emitNoFly(){ console.log('ACMP_NO_FLY:' + JSON.stringify(noFlyZones)); }
 function emitPoi(){ console.log('ACMP_POI:' + JSON.stringify(poiArea)); }
@@ -351,7 +354,7 @@ function setProjectGeometry(newAreas,newZones,newPoi=[]){
 function undo(){ if(activeFlight.length){activeFlight.pop();redrawFlightAreas();} }
 function clearPolygon(){ flightAreas=[]; activeFlight=[]; redrawFlightAreas(); }
 function zoomToArea(){ const layers=[]; flightAreas.forEach(a=>layers.push(L.polygon(a))); noFlyZones.forEach(z=>layers.push(L.polygon(z))); if(layers.length) map.fitBounds(L.featureGroup(layers).getBounds().pad(.12)); }
-function setBase(name){ if(name==='satellite'){map.removeLayer(normal);satellite.addTo(map);}else{map.removeLayer(satellite);normal.addTo(map);} }
+function setBase(name){ activeBase=name==='satellite'?'satellite':'normal'; if(activeBase==='satellite'){map.removeLayer(normal);satellite.addTo(map);}else{map.removeLayer(satellite);normal.addTo(map);} if(poi3dActive && poi3dGroundMode==='current')buildPoi3D(); }
 function setGeozones(value){ if(value){geozones.addTo(map);}else{map.removeLayer(geozones);} }
 function setGeozoneOpacity(value){ geozones.setOpacity(value/100); }
 function setLocalRules(value){ if(value){localRules.addTo(map);}else{map.removeLayer(localRules);} }
@@ -446,7 +449,7 @@ function showPoiLevels(levels, selectedLevel=0, estimatedPaths=[], outsideZone=n
   clearMission();
   if(!levels.length) return;
   if(outsideZone) L.geoJSON(outsideZone,{style:{color:'#00bcd4',weight:2,fillColor:'#00c8e8',fillOpacity:.18,dashArray:'8 5'},onEachFeature:(_feature,layer)=>layer.bindTooltip('POI-Bahn außerhalb des gezeichneten Flugbereichs', {sticky:true})}).addTo(overshootZoneLayer);
-  const legend=levels.map((level,index)=>{const name=level.kind==='roof_capture'?mapText('Dachbahn'):`${mapText('Ebene')} ${index+1}`; return `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:hsl(${220-index*190/Math.max(1,levels.length-1)},78%,45%);margin-right:5px"></span>${name} · H: ${level.altitude.toFixed(1)} m · ${level.waypoints} WP · ≈ ${level.durationText} min · ${level.gimbal.toFixed(0)}°`;}).join('<br>');
+  const legend=levels.map((level,index)=>{const name=level.kind==='roof_capture'?mapText('Dachbahn'):level.kind==='roof_topdown'?mapText('Dachscan (Top-Down)'):`${mapText('Ebene')} ${index+1}`; return `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:hsl(${220-index*190/Math.max(1,levels.length-1)},78%,45%);margin-right:5px"></span>${name} · H: ${level.altitude.toFixed(1)} m · ${level.waypoints} WP · ≈ ${level.durationText} min · ${level.gimbal.toFixed(0)}°`;}).join('<br>');
   const div=document.getElementById('acmp-mission-legend');
   if(div){
     div.style.display='block';
@@ -526,18 +529,53 @@ function poi3dAxis(origin, radius){
   poi3dScene.add(new THREE.ArrowHelper(new THREE.Vector3(0,1,0),zero,length,0x16a34a,.8,.4));
   poi3dScene.add(new THREE.ArrowHelper(new THREE.Vector3(0,0,-1),zero,length,0x2563eb,.8,.4));
 }
+function poi3dTileCoordinate(lat, lon, zoom){
+  const safeLat=Math.max(-85.05112878,Math.min(85.05112878,lat)), scale=2**zoom;
+  return {x:Math.floor((lon+180)/360*scale),y:Math.floor((1-Math.asinh(Math.tan(safeLat*Math.PI/180))/Math.PI)/2*scale)};
+}
+function poi3dTileLongitude(x, zoom){return x/(2**zoom)*360-180;}
+function poi3dTileLatitude(y, zoom){return Math.atan(Math.sinh(Math.PI*(1-2*y/(2**zoom))))*180/Math.PI;}
+function poi3dTileUrl(kind, x, y, zoom){
+  if(kind==='satellite')return `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${zoom}/${y}/${x}`;
+  return `https://${'abc'[(x+y)%3]}.tile.openstreetmap.org/${zoom}/${x}/${y}.png`;
+}
+function poi3dLoadImage(url){return new Promise((resolve,reject)=>{const image=new Image();image.crossOrigin='anonymous';image.onload=()=>resolve(image);image.onerror=reject;image.src=url;});}
+async function poi3dAddGroundMap(points, origin, scene){
+  const attribution=document.getElementById('acmp-3d-map-attribution'), requested=poi3dGroundMode==='current'?activeBase:poi3dGroundMode;
+  if(requested==='off'){attribution.style.display='none';return;}
+  const latitudes=points.map(point=>point.lat), longitudes=points.map(point=>point.lon), centerLat=(Math.max(...latitudes)+Math.min(...latitudes))/2, latPad=50/111132.92, lonPad=50/(111319.49*Math.cos(centerLat*Math.PI/180));
+  const north=Math.min(85,Math.max(...latitudes)+latPad), south=Math.max(-85,Math.min(...latitudes)-latPad), west=Math.max(-179.9,Math.min(...longitudes)-lonPad), east=Math.min(179.9,Math.max(...longitudes)+lonPad);
+  let zoom=13, first, last;
+  for(let candidate=19;candidate>=13;candidate--){const a=poi3dTileCoordinate(north,west,candidate),b=poi3dTileCoordinate(south,east,candidate);if((b.x-a.x+1)<=6&&(b.y-a.y+1)<=6){zoom=candidate;first=a;last=b;break;}}
+  if(!first){first=poi3dTileCoordinate(north,west,zoom);last=poi3dTileCoordinate(south,east,zoom);}
+  const columns=last.x-first.x+1, rows=last.y-first.y+1, canvas=document.createElement('canvas');canvas.width=columns*256;canvas.height=rows*256;
+  try{
+    const images=await Promise.all(Array.from({length:columns*rows},(_,index)=>{const x=first.x+index%columns,y=first.y+Math.floor(index/columns);return poi3dLoadImage(poi3dTileUrl(requested,x,y,zoom));}));
+    if(poi3dScene!==scene)return;
+    const context=canvas.getContext('2d');images.forEach((image,index)=>context.drawImage(image,(index%columns)*256,Math.floor(index/columns)*256));
+    const worldPixel=(latitude,longitude)=>{const scale=2**zoom*256;return {x:(longitude+180)/360*scale,y:(1-Math.asinh(Math.tan(latitude*Math.PI/180))/Math.PI)/2*scale};};
+    const tileOrigin={x:first.x*256,y:first.y*256}, upperLeft=worldPixel(north,west), lowerRight=worldPixel(south,east), crop=document.createElement('canvas');crop.width=Math.max(1,Math.round(lowerRight.x-upperLeft.x));crop.height=Math.max(1,Math.round(lowerRight.y-upperLeft.y));crop.getContext('2d').drawImage(canvas,upperLeft.x-tileOrigin.x,upperLeft.y-tileOrigin.y,lowerRight.x-upperLeft.x,lowerRight.y-upperLeft.y,0,0,crop.width,crop.height);
+    const nw=poi3dLocal({lat:north,lon:west,altitude:0},origin),se=poi3dLocal({lat:south,lon:east,altitude:0},origin);
+    const texture=new THREE.CanvasTexture(crop);texture.anisotropy=Math.min(8,poi3dRenderer.capabilities.getMaxAnisotropy());
+    const ground=new THREE.Mesh(new THREE.PlaneGeometry(se.x-nw.x,se.z-nw.z),new THREE.MeshBasicMaterial({map:texture,side:THREE.DoubleSide}));ground.rotation.x=-Math.PI/2;ground.position.set((nw.x+se.x)/2,.012,(nw.z+se.z)/2);scene.add(ground);
+    attribution.textContent=(requested==='satellite'?'Bodenkarte: © Esri World Imagery':'Bodenkarte: © OpenStreetMap-Mitwirkende')+' · Flugbereich + 50 m';attribution.style.display='inline';
+  }catch(error){if(poi3dScene===scene){attribution.textContent='Bodenkarte konnte nicht geladen werden.';attribution.style.display='inline';console.warn('ACMP 3D ground map:',error);}}
+}
 function buildPoi3D(){
   if(!poi3dData || !window.THREE)return;
   if(poi3dControls) poi3dControls.dispose(); if(poi3dRenderer){poi3dRenderer.dispose(); poi3dContainer.querySelectorAll('canvas').forEach(node=>node.remove());}
   const missions=poi3dData.missions.filter(m=>m.waypoints && m.waypoints.length);
   const first=missions[0].waypoints[0], origin=[first.lat,first.lon];
-  poi3dScene=new THREE.Scene(); poi3dScene.fog=new THREE.Fog(0xeaf3f8,180,650);
+  poi3dScene=new THREE.Scene();
   poi3dCamera=new THREE.PerspectiveCamera(48,Math.max(1,poi3dContainer.clientWidth)/Math.max(1,poi3dContainer.clientHeight),.1,5000);
   poi3dRenderer=new THREE.WebGLRenderer({antialias:true,alpha:true}); poi3dRenderer.setPixelRatio(Math.min(window.devicePixelRatio,2)); poi3dRenderer.setSize(poi3dContainer.clientWidth,poi3dContainer.clientHeight); poi3dRenderer.outputEncoding=THREE.sRGBEncoding; poi3dContainer.appendChild(poi3dRenderer.domElement);
   poi3dScene.add(new THREE.HemisphereLight(0xffffff,0x718096,1.35)); const light=new THREE.DirectionalLight(0xffffff,.85); light.position.set(80,150,100); poi3dScene.add(light);
   const all=missions.flatMap(m=>m.waypoints), groundPoints=[...(poi3dData.poi||[]),...(poi3dData.flightAreas||[]).flat(),...all.map(w=>[w.lat,w.lon])];
+  const geographicPoints=groundPoints.map(point=>Array.isArray(point)?{lat:point[0],lon:point[1]}:point);
+  const groundMapPoints=[...(poi3dData.flightAreas||[]).flat(),...(poi3dData.poi||[])].map(point=>({lat:point[0],lon:point[1]}));
   const bounds=groundPoints.map(p=>Array.isArray(p)?poi3dGround(p,origin):poi3dLocal(p,origin)); let radius=20; bounds.forEach(p=>radius=Math.max(radius,Math.abs(p.x),Math.abs(p.z),p.y));
   const grid=new THREE.GridHelper(Math.max(40,radius*2.4),16,0x94a3b8,0xcbd5e1); poi3dScene.add(grid);
+  poi3dAddGroundMap(groundMapPoints.length?groundMapPoints:geographicPoints,origin,poi3dScene);
   poi3dAxis(origin,radius);
   (poi3dData.flightAreas||[]).forEach(area=>poi3dPolygon(area,origin,0x38bdf8,.16,0));
   poi3dPolygon(poi3dData.poi||[],origin,0xa855f7,.28,Math.max(0,poi3dData.objectHeight||0));
@@ -551,7 +589,7 @@ function buildPoi3D(){
       const waypoint=mission.waypoints[index], yaw=(waypoint.yaw||0)*Math.PI/180, pitch=(waypoint.gimbalPitch||0)*Math.PI/180;
       const direction=new THREE.Vector3(Math.sin(yaw)*Math.cos(pitch),Math.sin(pitch),-Math.cos(yaw)*Math.cos(pitch)).normalize();
       const arrowSize=Math.max(2.2,Math.min(5.5,radius*.075))*poi3dMarkerScale;
-      const arrow=new THREE.ArrowHelper(direction,point.clone().add(new THREE.Vector3(0,.8,0)),arrowSize,color,Math.max(.7,arrowSize*.28),Math.max(.35,arrowSize*.15)); poi3dScene.add(arrow);
+      const arrow=new THREE.ArrowHelper(direction,point.clone(),arrowSize,color,Math.max(.7,arrowSize*.28),Math.max(.35,arrowSize*.15)); poi3dScene.add(arrow);
     });
   });
   poi3dCamera.position.set(radius*1.25,Math.max(35,radius*.95),radius*1.35);
@@ -1210,6 +1248,22 @@ class MainWindow(QMainWindow):
         self._poi_control_point_detail_changed(self.poi_control_point_detail.value())
         self.poi_object_height = self._number(20, 1, 500, 1, " m")
         self.poi_distance = self._number(15, 2, 500, 1, " m")
+        self.poi_top_down_roof_scan = QCheckBox("Dachfläche von oben scannen")
+        self.poi_top_down_roof_scan.setToolTip("Fliegt oberhalb der Objekthöhe im Objektabstand eine kurze Top-Down-Rasterbahn nur über der POI-Fläche (Gimbal −90°).")
+        self.poi_top_down_reduced_overshoot = QCheckBox("Sparmodus")
+        self.poi_top_down_reduced_overshoot.setToolTip("Verwendet an Dachscan-Umkehrpunkten nur einen statt zwei Overshooting-Steuerpunkten.")
+        self.poi_top_down_reduced_overshoot.setEnabled(False)
+        self.poi_top_down_merge_with_roof = QCheckBox("An POI-Bahn anhängen")
+        self.poi_top_down_merge_with_roof.setToolTip("Hält die kurze Dachbahn und den anschließenden Top-Down-Scan möglichst in derselben Mission zusammen.")
+        self.poi_top_down_merge_with_roof.setEnabled(False)
+        self.poi_top_down_roof_scan.toggled.connect(self._poi_top_down_roof_scan_changed)
+        poi_roof_scan_options = QWidget()
+        poi_roof_scan_layout = QHBoxLayout(poi_roof_scan_options)
+        poi_roof_scan_layout.setContentsMargins(0, 0, 0, 0)
+        poi_roof_scan_layout.addWidget(self.poi_top_down_roof_scan)
+        poi_roof_scan_layout.addWidget(self.poi_top_down_reduced_overshoot)
+        poi_roof_scan_layout.addWidget(self.poi_top_down_merge_with_roof)
+        poi_roof_scan_layout.addStretch(1)
         self.poi_min_altitude = self._number(10, 1, 500, 1, " m")
         self.poi_max_altitude = self._number(60, 1, 500, 1, " m")
         self.poi_vertical_overlap = self._number(70, 0, 95, 1, " %")
@@ -1228,6 +1282,7 @@ class MainWindow(QMainWindow):
         poi_settings_form.addRow("Steuerpunktdichte:", poi_detail_widget)
         poi_settings_form.addRow("Objekthöhe:", self.poi_object_height)
         poi_settings_form.addRow("Objektabstand:", self.poi_distance)
+        poi_settings_form.addRow(poi_roof_scan_options)
         poi_settings_form.addRow("Mindestflughöhe:", self.poi_min_altitude)
         poi_settings_form.addRow("Maximalflughöhe:", self.poi_max_altitude)
         poi_settings_form.addRow("Überlappung zwischen Höhenbahnen:", self.poi_vertical_overlap)
@@ -1813,6 +1868,9 @@ class MainWindow(QMainWindow):
             "poi_facade_bearing": self.poi_facade_bearing.value(), "poi_orbit_direction": self.poi_orbit_direction.currentText(),
             "poi_object_height": self.poi_object_height.value(),
             "poi_distance": self.poi_distance.value(), "poi_min_altitude": self.poi_min_altitude.value(),
+            "poi_top_down_roof_scan": self.poi_top_down_roof_scan.isChecked(),
+            "poi_top_down_reduced_overshoot": self.poi_top_down_reduced_overshoot.isChecked(),
+            "poi_top_down_merge_with_roof": self.poi_top_down_merge_with_roof.isChecked(),
             "poi_max_altitude": self.poi_max_altitude.value(), "poi_vertical_overlap": self.poi_vertical_overlap.value(),
             "poi_along_overlap": self.poi_along_overlap.value(), "poi_speed": self.poi_speed.value(),
             "poi_minimum_interval_duration": self.poi_minimum_interval_duration.value(), "poi_waypoint_action": self.poi_waypoint_action.currentText(),
@@ -2190,6 +2248,10 @@ class MainWindow(QMainWindow):
         self.reduced_overshoot_button.setChecked(bool(values.get("reduced_overshoot_points", False)))
         self.flight_path_preview.setChecked(bool(values.get("flight_path_preview", True)))
         self.poi_flight_path_preview.setChecked(bool(values.get("poi_flight_path_preview", True)))
+        self.poi_top_down_roof_scan.setChecked(bool(values.get("poi_top_down_roof_scan", False)))
+        self.poi_top_down_reduced_overshoot.setChecked(bool(values.get("poi_top_down_reduced_overshoot", False)))
+        self.poi_top_down_merge_with_roof.setChecked(bool(values.get("poi_top_down_merge_with_roof", False)))
+        self._poi_top_down_roof_scan_changed(self.poi_top_down_roof_scan.isChecked())
         self._direction_mode_changed(self.direction_mode.currentText())
         self._route_mode_changed(self.route_mode.currentText())
         self._update_photogrammetry_geometry()
@@ -2505,6 +2567,10 @@ class MainWindow(QMainWindow):
         self._set_poi_option_visible(self.poi_facade_bearing, is_facade)
         self._set_poi_option_visible(self.poi_orbit_geometry, not is_facade)
         self._set_poi_option_visible(self.poi_orbit_direction, not is_facade)
+
+    def _poi_top_down_roof_scan_changed(self, enabled: bool):
+        self.poi_top_down_reduced_overshoot.setEnabled(enabled)
+        self.poi_top_down_merge_with_roof.setEnabled(enabled)
 
     def _poi_avoidance_mode_changed(self, mode: str):
         self._set_poi_option_visible(
@@ -3064,6 +3130,9 @@ class MainWindow(QMainWindow):
         self.poi_control_point_detail.valueChanged.connect(self._save_last_flight_settings)
         self.flight_path_preview.toggled.connect(self._save_last_flight_settings)
         self.poi_flight_path_preview.toggled.connect(self._save_last_flight_settings)
+        self.poi_top_down_roof_scan.toggled.connect(self._save_last_flight_settings)
+        self.poi_top_down_reduced_overshoot.toggled.connect(self._save_last_flight_settings)
+        self.poi_top_down_merge_with_roof.toggled.connect(self._save_last_flight_settings)
 
     def _save_last_flight_settings(self, *_args):
         self.settings.setValue("last_flight_settings", json.dumps(self._preset_values(), ensure_ascii=False))
@@ -3567,6 +3636,9 @@ class MainWindow(QMainWindow):
                 orbit_geometry=self._canonical(self.poi_orbit_geometry.currentText()),
                 contour_boundary_clearance_m=(0.25 if self.poi_avoidance_mode.currentText() == "Stützpunkte für geradere Bahnen" else 2.0),
                 contour_support_spacing_m=(self.poi_support_spacing.value() if self.poi_avoidance_mode.currentText() == "Stützpunkte für geradere Bahnen" else None),
+                top_down_roof_scan=self.poi_top_down_roof_scan.isChecked(),
+                top_down_overshoot_m=self.overshoot_distance.value(),
+                reduced_overshoot=self.poi_top_down_reduced_overshoot.isChecked(),
                 no_fly_strategy=(
                     "allow" if no_fly_choice == "Sperrgebiet durchfliegen" else
                     "skip" if no_fly_choice == "Sperrgebiete auslassen" else "adapt"
@@ -3582,7 +3654,9 @@ class MainWindow(QMainWindow):
         self.generated_poi_plan = plan
         self.generated_route = [[waypoint.lat, waypoint.lon] for waypoint in plan.waypoints]
         self.generated_missions = []
-        self.generated_poi_waypoint_missions = self._split_poi_levels(plan, capture_plan.flight_speed_mps)
+        self.generated_poi_waypoint_missions = self._split_poi_levels(
+            plan, capture_plan.flight_speed_mps, self.poi_top_down_merge_with_roof.isChecked(),
+        )
         self.generated_poi_missions = [
             [[waypoint.lat, waypoint.lon] for waypoint in mission]
             for mission in self.generated_poi_waypoint_missions
@@ -3631,21 +3705,39 @@ class MainWindow(QMainWindow):
         )
         self.waypoint_warning.setStyleSheet("color:#b36b00;font-weight:600;" if split_levels else "color:#167a36;font-weight:600;")
 
-    def _split_poi_levels(self, plan, speed_mps: float) -> list[list]:
+    def _split_poi_levels(self, plan, speed_mps: float, merge_top_down_with_roof: bool = False) -> list[list]:
         """Keep whole height bands together; only split inside an oversized band."""
         max_points = int(self.max_waypoints.value())
         max_seconds = self.max_flight_minutes.value() * 60
         result, current = [], []
-        for band_index, band in enumerate(plan.levels):
+        band_index = 0
+        while band_index < len(plan.levels):
+            band = plan.levels[band_index]
             route = list(band)
             coordinates = lambda points: [[waypoint.lat, waypoint.lon] for waypoint in points]
             if band_index and band_index < len(plan.separate_before) and plan.separate_before[band_index] and current:
                 result.append(current)
                 current = []
+            is_top_down = route and route[0].kind == "roof_topdown"
+            # Default: keep the independent roof scan a separate export. When
+            # requested, group its preceding short roof pass with it before
+            # applying the normal mission limits.
+            if is_top_down and not merge_top_down_with_roof and current:
+                result.append(current)
+                current = []
+            if (
+                merge_top_down_with_roof and route and route[0].kind == "roof_capture"
+                and band_index + 1 < len(plan.levels)
+                and plan.levels[band_index + 1][0].kind == "roof_topdown"
+                and not plan.separate_before[band_index + 1]
+            ):
+                route += list(plan.levels[band_index + 1])
+                band_index += 1
             fits_alone = len(route) <= max_points and estimated_route_seconds(coordinates(route), speed_mps) <= max_seconds
             combined = current + route
             if fits_alone and (not current or (len(combined) <= max_points and estimated_route_seconds(coordinates(combined), speed_mps) <= max_seconds)):
                 current = combined
+                band_index += 1
                 continue
             if current:
                 result.append(current)
@@ -3658,11 +3750,15 @@ class MainWindow(QMainWindow):
                     candidate = part + [waypoint]
                     if part and (len(candidate) > max_points or estimated_route_seconds(coordinates(candidate), speed_mps) > max_seconds):
                         result.append(part)
-                        part = [waypoint]
+                        # A split through the continuous roof scan starts at
+                        # the exact last coordinate of the preceding mission.
+                        # This avoids an unrecorded gap between two exports.
+                        part = [part[-1], waypoint] if waypoint.kind == "roof_topdown" else [waypoint]
                     else:
                         part = candidate
                 if part:
                     result.append(part)
+            band_index += 1
         if current:
             result.append(current)
         return result
