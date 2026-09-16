@@ -185,9 +185,11 @@ def canonical_ui_text(value: str) -> str:
 MAP_HTML = r"""<!DOCTYPE html>
 <html lang="de"><head><meta charset="utf-8">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<style>html,body,#map{height:100%;width:100%;margin:0}.leaflet-container{font-family:Segoe UI,Arial,sans-serif}</style>
+<style>html,body,#map{height:100%;width:100%;margin:0}.leaflet-container{font-family:Segoe UI,Arial,sans-serif}.acmp-3d-toggle{position:absolute;z-index:1200;bottom:24px;right:12px;border:1px solid #8b5cf6;border-radius:6px;background:#fff;color:#4c1d95;padding:7px 10px;font:700 12px Segoe UI,Arial;box-shadow:0 1px 5px #555;cursor:pointer}.acmp-3d-toggle:hover{background:#f5f3ff}.acmp-3d-view{position:absolute;inset:0;z-index:1100;background:linear-gradient(#dcecf6,#f8fafc 58%,#cbd5e1);display:none;overflow:hidden}.acmp-3d-hint{position:absolute;z-index:1;bottom:16px;left:16px;color:#172b4d;background:rgba(255,255,255,.9);border:1px solid #aeb8c4;border-radius:6px;padding:7px 9px;font:12px Segoe UI,Arial;pointer-events:none}.acmp-3d-scale{position:absolute;z-index:1;top:12px;right:12px;color:#172b4d;background:rgba(255,255,255,.93);border:1px solid #aeb8c4;border-radius:6px;padding:7px 9px;font:12px Segoe UI,Arial}.acmp-3d-scale input{width:120px;vertical-align:middle}</style>
 </head><body><div id="map"></div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script>
 const normal = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 20, attribution:'© OpenStreetMap-Mitwirkende'});
 const satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom: 19, attribution:'Tiles © Esri'});
@@ -229,6 +231,10 @@ let importedMissionLayer = L.layerGroup().addTo(map);
 const importedMissionLayers = new Map();
 let overshootZoneLayer = L.layerGroup().addTo(map);
 let geozoneConflictLayer = L.layerGroup().addTo(map);
+let poi3dData=null, poi3dActive=false, poi3dScene=null, poi3dRenderer=null, poi3dCamera=null, poi3dControls=null, poi3dRenderToken=0, poi3dMarkerScale=.7;
+const poi3dContainer=document.createElement('div'); poi3dContainer.className='acmp-3d-view'; poi3dContainer.innerHTML='<div class="acmp-3d-scale">Markierungsgröße <input id="acmp-3d-scale" type="range" min="35" max="140" value="70"> <span id="acmp-3d-scale-value">70%</span></div><div class="acmp-3d-hint">Linke Maustaste: drehen · Mausrad: zoomen · rechte Maustaste: verschieben<hr style="border:0;border-top:1px solid #cbd5e1;margin:6px 0"><b>Lokale Achsen</b> · Ursprung: WP 1<br><span style="color:#dc2626">X</span> Ost · <span style="color:#16a34a">Y</span> Höhe · <span style="color:#2563eb">−Z</span> Nord</div>'; document.body.appendChild(poi3dContainer);
+const poi3dToggle=document.createElement('button'); poi3dToggle.className='acmp-3d-toggle'; poi3dToggle.textContent='3D-Ansicht'; poi3dToggle.style.display='none'; document.body.appendChild(poi3dToggle);
+document.getElementById('acmp-3d-scale').oninput=event=>{poi3dMarkerScale=Number(event.target.value)/100;document.getElementById('acmp-3d-scale-value').textContent=`${event.target.value}%`;if(poi3dActive)buildPoi3D();};
 function emitFlightAreas(){ console.log('ACMP_FLIGHT_AREAS:' + JSON.stringify(flightAreas)); }
 function emitNoFly(){ console.log('ACMP_NO_FLY:' + JSON.stringify(noFlyZones)); }
 function emitPoi(){ console.log('ACMP_POI:' + JSON.stringify(poiArea)); }
@@ -482,6 +488,82 @@ function showPoiLevels(levels, selectedLevel=0, estimatedPaths=[], outsideZone=n
     if(Number.isFinite(heading)) drawHeadingIndicator(point,heading,referenceColor,mapText('POI-Blickrichtung'));
   });
 }
+function clearPoi3D(){
+  poi3dData=null; poi3dToggle.style.display='none';
+  if(poi3dActive) togglePoi3D(false);
+}
+function setPoi3DData(data){
+  poi3dData=data;
+  poi3dToggle.style.display=(data && data.missions && data.missions.some(m=>m.waypoints && m.waypoints.length))?'block':'none';
+  if(poi3dActive) buildPoi3D();
+}
+function poi3dLocal(point, origin){
+  const latScale=111132.92, lonScale=111319.49*Math.cos(origin[0]*Math.PI/180);
+  return new THREE.Vector3((point.lon-origin[1])*lonScale,point.altitude||0,-(point.lat-origin[0])*latScale);
+}
+function poi3dGround(point, origin){ return poi3dLocal({lat:point[0],lon:point[1],altitude:0},origin); }
+function poi3dLabel(text, color){
+  const canvas=document.createElement('canvas'); canvas.width=128; canvas.height=128;
+  const c=canvas.getContext('2d'); c.beginPath(); c.arc(64,64,43,0,Math.PI*2); c.fillStyle='rgba(255,255,255,.95)'; c.fill(); c.lineWidth=7; c.strokeStyle=color; c.stroke(); c.fillStyle='#172b4d'; c.font='bold 34px Segoe UI,Arial'; c.textAlign='center'; c.textBaseline='middle'; c.fillText(text,64,66);
+  const sprite=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(canvas),depthTest:false})); const size=2.8*poi3dMarkerScale; sprite.scale.set(size,size,1); return sprite;
+}
+function poi3dPolygon(points, origin, color, opacity, height=0){
+  if(!points || points.length<3)return null;
+  // The scene uses X=east and Z=-north.  Reuse that exact Z value for the
+  // Shape, otherwise only the extruded surfaces would be mirrored.
+  const shape=new THREE.Shape(points.map(p=>{const v=poi3dGround(p,origin);return new THREE.Vector2(v.x,v.z);}));
+  const geometry=height>0?new THREE.ExtrudeGeometry(shape,{depth:height,bevelEnabled:false}):new THREE.ShapeGeometry(shape);
+  geometry.rotateX(Math.PI/2); if(height>0) geometry.translate(0,height,0);
+  const mesh=new THREE.Mesh(geometry,new THREE.MeshStandardMaterial({color,transparent:true,opacity,side:THREE.DoubleSide,depthWrite:false})); poi3dScene.add(mesh);
+  const outline=points.concat([points[0]]).map(p=>poi3dGround(p,origin)); if(height>0){const top=outline.map(v=>new THREE.Vector3(v.x,height,v.z)); poi3dScene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(top),new THREE.LineBasicMaterial({color,transparent:true,opacity:.9})));}
+  poi3dScene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(outline),new THREE.LineBasicMaterial({color,transparent:true,opacity:.9})));
+  return mesh;
+}
+function poi3dAxis(origin, radius){
+  const length=Math.max(3,Math.min(8,radius*.08));
+  const zero=new THREE.Vector3(0,0,0);
+  poi3dScene.add(new THREE.ArrowHelper(new THREE.Vector3(1,0,0),zero,length,0xdc2626,.8,.4));
+  poi3dScene.add(new THREE.ArrowHelper(new THREE.Vector3(0,1,0),zero,length,0x16a34a,.8,.4));
+  poi3dScene.add(new THREE.ArrowHelper(new THREE.Vector3(0,0,-1),zero,length,0x2563eb,.8,.4));
+}
+function buildPoi3D(){
+  if(!poi3dData || !window.THREE)return;
+  if(poi3dControls) poi3dControls.dispose(); if(poi3dRenderer){poi3dRenderer.dispose(); poi3dContainer.querySelectorAll('canvas').forEach(node=>node.remove());}
+  const missions=poi3dData.missions.filter(m=>m.waypoints && m.waypoints.length);
+  const first=missions[0].waypoints[0], origin=[first.lat,first.lon];
+  poi3dScene=new THREE.Scene(); poi3dScene.fog=new THREE.Fog(0xeaf3f8,180,650);
+  poi3dCamera=new THREE.PerspectiveCamera(48,Math.max(1,poi3dContainer.clientWidth)/Math.max(1,poi3dContainer.clientHeight),.1,5000);
+  poi3dRenderer=new THREE.WebGLRenderer({antialias:true,alpha:true}); poi3dRenderer.setPixelRatio(Math.min(window.devicePixelRatio,2)); poi3dRenderer.setSize(poi3dContainer.clientWidth,poi3dContainer.clientHeight); poi3dRenderer.outputEncoding=THREE.sRGBEncoding; poi3dContainer.appendChild(poi3dRenderer.domElement);
+  poi3dScene.add(new THREE.HemisphereLight(0xffffff,0x718096,1.35)); const light=new THREE.DirectionalLight(0xffffff,.85); light.position.set(80,150,100); poi3dScene.add(light);
+  const all=missions.flatMap(m=>m.waypoints), groundPoints=[...(poi3dData.poi||[]),...(poi3dData.flightAreas||[]).flat(),...all.map(w=>[w.lat,w.lon])];
+  const bounds=groundPoints.map(p=>Array.isArray(p)?poi3dGround(p,origin):poi3dLocal(p,origin)); let radius=20; bounds.forEach(p=>radius=Math.max(radius,Math.abs(p.x),Math.abs(p.z),p.y));
+  const grid=new THREE.GridHelper(Math.max(40,radius*2.4),16,0x94a3b8,0xcbd5e1); poi3dScene.add(grid);
+  poi3dAxis(origin,radius);
+  (poi3dData.flightAreas||[]).forEach(area=>poi3dPolygon(area,origin,0x38bdf8,.16,0));
+  poi3dPolygon(poi3dData.poi||[],origin,0xa855f7,.28,Math.max(0,poi3dData.objectHeight||0));
+  const colors=[0xd13c10,0x7b3fb2,0x087f5b,0x9a6700,0x1261a0];
+  missions.forEach((mission,missionIndex)=>{
+    const color=colors[missionIndex%colors.length], points=mission.waypoints.map(w=>poi3dLocal(w,origin));
+    let path=points; if(poi3dData.smooth && points.length>2){path=new THREE.CatmullRomCurve3(points,false,'centripetal').getPoints(Math.max(20,points.length*12));}
+    poi3dScene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(path),new THREE.LineBasicMaterial({color,linewidth:2})));
+    points.forEach((point,index)=>{
+      const label=poi3dLabel(`${missionIndex+1}.${index+1}`,`#${color.toString(16).padStart(6,'0')}`); label.position.copy(point); poi3dScene.add(label);
+      const waypoint=mission.waypoints[index], yaw=(waypoint.yaw||0)*Math.PI/180, pitch=(waypoint.gimbalPitch||0)*Math.PI/180;
+      const direction=new THREE.Vector3(Math.sin(yaw)*Math.cos(pitch),Math.sin(pitch),-Math.cos(yaw)*Math.cos(pitch)).normalize();
+      const arrowSize=Math.max(2.2,Math.min(5.5,radius*.075))*poi3dMarkerScale;
+      const arrow=new THREE.ArrowHelper(direction,point.clone().add(new THREE.Vector3(0,.8,0)),arrowSize,color,Math.max(.7,arrowSize*.28),Math.max(.35,arrowSize*.15)); poi3dScene.add(arrow);
+    });
+  });
+  poi3dCamera.position.set(radius*1.25,Math.max(35,radius*.95),radius*1.35);
+  poi3dControls=new THREE.OrbitControls(poi3dCamera,poi3dRenderer.domElement); poi3dControls.target.set(0,(poi3dData.objectHeight||0)*.38,0); poi3dControls.enableDamping=true; poi3dControls.dampingFactor=.09; poi3dControls.maxPolarAngle=Math.PI*.49;
+  const token=++poi3dRenderToken; const render=()=>{if(!poi3dActive || token!==poi3dRenderToken)return; poi3dControls.update(); poi3dRenderer.render(poi3dScene,poi3dCamera); requestAnimationFrame(render);}; render();
+}
+function togglePoi3D(active){
+  poi3dActive=active; if(!active) poi3dRenderToken++; poi3dContainer.style.display=active?'block':'none'; poi3dToggle.textContent=active?'2D-Karte':'3D-Ansicht';
+  if(active) buildPoi3D(); else map.invalidateSize();
+}
+poi3dToggle.onclick=()=>togglePoi3D(!poi3dActive);
+window.addEventListener('resize',()=>{if(poi3dActive && poi3dRenderer){poi3dCamera.aspect=poi3dContainer.clientWidth/poi3dContainer.clientHeight;poi3dCamera.updateProjectionMatrix();poi3dRenderer.setSize(poi3dContainer.clientWidth,poi3dContainer.clientHeight);}});
 </script></body></html>"""
 
 
@@ -2304,6 +2386,8 @@ class MainWindow(QMainWindow):
             self._show_missions(missions)
         else:
             self.js("clearMission();")
+        if self.generated_poi_waypoint_missions:
+            self.js(f"setPoi3DData({json.dumps(self._poi_3d_payload())});")
         self.statusBar().showMessage(f"Projekt geöffnet: {Path(filename).name}", 5000)
 
     def js(self, script: str):
@@ -2469,6 +2553,35 @@ class MainWindow(QMainWindow):
         self.poi_level_slider.blockSignals(False)
         self.poi_level_label.setText("Nach dem Generieren: alle Ebenen anzeigen")
         self.poi_mission_overview.setText("Nach dem Generieren erscheinen hier Wegpunkte und Dauer je Mission.")
+        if self._map_ready:
+            self.js("clearPoi3D();")
+
+    def _poi_3d_payload(self) -> dict:
+        """Return the exported POI missions with all 3D display metadata.
+
+        Coordinates remain geographic until JavaScript establishes its local ENU-like
+        metre frame at the first waypoint.  This avoids projection drift and keeps
+        the 3D view independent from the current map zoom.
+        """
+        return {
+            "poi": self.poi_area,
+            "flightAreas": self.flight_areas,
+            "objectHeight": self.poi_object_height.value(),
+            "smooth": self.poi_flight_path_preview.isChecked(),
+            "missions": [
+                {"waypoints": [
+                    {
+                        "lat": waypoint.lat,
+                        "lon": waypoint.lon,
+                        "altitude": waypoint.altitude_m,
+                        "yaw": waypoint.yaw_deg,
+                        "gimbalPitch": waypoint.gimbal_pitch_deg,
+                    }
+                    for waypoint in mission
+                ]}
+                for mission in self.generated_poi_waypoint_missions
+            ],
+        }
 
     def _show_poi_plan(self):
         if self.generated_poi_plan is None:
@@ -2500,6 +2613,7 @@ class MainWindow(QMainWindow):
             f"showPoiLevels({json.dumps(levels)}, {self.poi_level_slider.value()}, "
             f"{json.dumps(estimated_paths)}, {json.dumps(self._poi_outside_zone_feature())});"
         )
+        self.js(f"setPoi3DData({json.dumps(self._poi_3d_payload())});")
 
     def _set_poi_option_visible(self, field, visible: bool):
         field.setVisible(visible)
@@ -3144,6 +3258,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "force_one_button"):
             self.force_one_button.setVisible(False)
         self.js("clearMission()")
+        self.js("clearPoi3D()")
         if self.poi_area:
             self.statusBar().showMessage("Point of Interest erstellt. Die POI-Aufnahme kann nun konfiguriert werden.", 4000)
 
@@ -3574,6 +3689,7 @@ class MainWindow(QMainWindow):
             self.generated_poi_waypoint_missions = [merged]
             self.generated_poi_missions = [[[waypoint.lat, waypoint.lon] for waypoint in merged]]
             self._refresh_rc_export_list(self.generated_poi_missions)
+            self._show_poi_plan()
             try:
                 speed_mps = self._poi_capture_plan()[0].flight_speed_mps
             except ValueError:
