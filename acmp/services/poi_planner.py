@@ -12,7 +12,10 @@ import math
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
-from acmp.services.route_planner import add_overshoot_turns, generate_lawnmower_route, optimal_direction_deg
+from acmp.services.route_planner import (
+    add_overshoot_turns, centripetal_catmull_rom_route, generate_lawnmower_route,
+    optimal_direction_deg,
+)
 
 
 class POIPlanningError(ValueError):
@@ -34,8 +37,8 @@ class POIWaypoint:
 class POIRoutePlan:
     levels: tuple[tuple[POIWaypoint, ...], ...]
     vertical_spacing_m: float
-    # A clipped ring may contain several disconnected arcs.  A boundary here
-    # is a hard mission break, never merely a preferred split point.
+    # A boundary here is a hard mission break: the direct connection from the
+    # preceding route part would touch a forbidden area.
     separate_before: tuple[bool, ...] = ()
 
     @property
@@ -124,6 +127,55 @@ def _inside_allowed(line, allowed, blocked):
     return (allowed is None or allowed.covers(line)) and not any(line.intersects(zone) for zone in blocked)
 
 
+def _catmull_rom_local_line(coordinates):
+    """Create the same centripetal Catmull-Rom approximation used by the map.
+
+    The shared preview helper accepts latitude/longitude pairs.  Scaling the
+    local metre coordinates into a tiny synthetic geographic area lets us use
+    exactly that interpolation here while retaining metre geometry for the
+    subsequent airspace check.
+    """
+    synthetic = [[y / 111_132.92, x / 111_319.49] for x, y in coordinates]
+    smoothed = centripetal_catmull_rom_route(synthetic, samples_per_segment=20)
+    return LineString([(lon * 111_319.49, lat * 111_132.92) for lat, lon in smoothed])
+
+
+def _smooth_connection_is_safe(previous_coordinates, following_coordinates, allowed, blocked):
+    """Check a new join with its two Catmull-Rom control points on each side."""
+    context = list(previous_coordinates[-2:]) + list(following_coordinates[:2])
+    return len(context) < 3 or _inside_allowed(_catmull_rom_local_line(context), allowed, blocked)
+
+
+def _smooth_connection_helpers(previous_coordinates, following_coordinates, allowed, blocked):
+    """Find one local steering point when a smooth join would graze a zone."""
+    start, end = previous_coordinates[-1], following_coordinates[0]
+    candidates = []
+    for zone in blocked:
+        centre = zone.centroid
+        for x, y in list(zone.exterior.coords)[:-1]:
+            dx, dy = x - centre.x, y - centre.y
+            length = math.hypot(dx, dy) or 1.0
+            # Keep the controller point a little beyond the already buffered
+            # no-fly boundary; it counters the spline's inward bow.
+            candidates.append((x + dx / length * 0.75, y + dy / length * 0.75))
+    candidates.sort(key=lambda point: math.dist(start, point) + math.dist(point, end))
+    sequences = [[point] for point in candidates]
+    # A rectangle that separates both endpoints cannot usually be passed by
+    # one corner alone.  Try a two-corner local bypass as well; this is still
+    # preferable to splitting otherwise short height bands into missions.
+    sequences.extend(
+        [[first, second] for first in candidates for second in candidates if first != second]
+    )
+    for steering_points in sequences:
+        connector = LineString([start, *steering_points, end])
+        context = list(previous_coordinates[-2:]) + steering_points + list(following_coordinates[:2])
+        if _inside_allowed(connector, allowed, blocked) and _inside_allowed(
+            _catmull_rom_local_line(context), allowed, blocked
+        ):
+            return steering_points
+    return None
+
+
 def _line_parts(geometry):
     """Return only usable, connected pieces from a Shapely line operation."""
     if geometry.is_empty:
@@ -153,7 +205,32 @@ def _safe_line_parts(line, allowed, blocked):
         first, last = parts[0], parts[-1]
         if math.hypot(first[0][0] - last[-1][0], first[0][1] - last[-1][1]) < 0.05:
             parts = [last + first[1:]] + parts[1:-1]
-    return parts
+    # Boolean clipping returns intersection coordinates directly on the
+    # forbidden boundary.  Move them a short distance into the retained line
+    # piece: otherwise a vertical level transition at that point merely
+    # *touches* the safety buffer and must be treated as unsafe.
+    def pull_endpoints_inward(part, distance_m=0.15):
+        if len(part) < 2:
+            return part
+        start, next_point = part[0], part[1]
+        end, previous = part[-1], part[-2]
+
+        def move_toward(point, target):
+            length = math.hypot(target[0] - point[0], target[1] - point[1])
+            if length <= distance_m:
+                return point
+            factor = distance_m / length
+            return (
+                point[0] + (target[0] - point[0]) * factor,
+                point[1] + (target[1] - point[1]) * factor,
+            )
+
+        adjusted = list(part)
+        adjusted[0] = move_toward(start, next_point)
+        adjusted[-1] = move_toward(end, previous)
+        return adjusted
+
+    return [pull_endpoints_inward(part) for part in parts]
 
 
 def _local_detour_route(coordinates, allowed, blocked, object_keepout):
@@ -502,6 +579,7 @@ def plan_poi_route(
     no_fly_strategy="adapt", outside_strategy="adapt", safety_margin_m=2.0,
     contour_boundary_clearance_m=1.5,
     contour_support_spacing_m=None,
+    no_fly_heights_m=None,
     top_down_roof_scan=False,
     top_down_overshoot_m=0.0,
     reduced_overshoot=False,
@@ -532,6 +610,8 @@ def plan_poi_route(
         _local_geometry(area, origin_lat, origin_lon).buffer(safety_margin_m)
         for area in no_fly_zones
     ]
+    zone_heights = list(no_fly_heights_m or [])
+    zone_heights = (zone_heights + [120.0] * max(0, len(no_fly_zones) - len(zone_heights)))[:len(no_fly_zones)]
     center = poi.centroid
     orbit = capture_type == "Objekt umrunden"
     if orbit:
@@ -583,6 +663,15 @@ def plan_poi_route(
             (center.x + normal[0] * line_normal + tangent[0] * min(tangent_values), center.y + normal[1] * line_normal + tangent[1] * min(tangent_values)),
             (center.x + normal[0] * line_normal + tangent[0] * max(tangent_values), center.y + normal[1] * line_normal + tangent[1] * max(tangent_values)),
         ]
+    # Preserve an otherwise unmodified path for levels above every applicable
+    # zone ceiling. It still respects the selected flight-area policy.
+    clear_coordinates = list(coordinates)
+    clear_line = LineString(clear_coordinates)
+    if outside_strategy == "adapt" and allowed is not None and not allowed.covers(clear_line):
+        clear_route = _flight_boundary_detours(clear_coordinates, allowed, [])
+        if clear_route is not None:
+            clear_coordinates = clear_route
+            clear_line = LineString(clear_coordinates)
     # First retain the requested offset.  For "Anpassen" use a whole safe
     # orbit/pass if possible; this preserves complete coverage and makes its
     # overlap calculation unambiguous.  Otherwise clipping below is the safe
@@ -634,10 +723,16 @@ def plan_poi_route(
     )
     levels = []
     separate_before = []
+    previous_coordinates = []
+    previous_altitude = None
     must_clip = not _inside_allowed(base_line, allowed, blocked)
     for level_index, (target_height, altitude) in enumerate(bands, 1):
-        ordered = coordinates if orbit or level_index % 2 else list(reversed(coordinates))
-        parts = [ordered] if not must_clip else _safe_line_parts(LineString(ordered), allowed, blocked)
+        active_zone_count = sum(altitude <= height + 0.5 for height in zone_heights)
+        level_coordinates = coordinates if active_zone_count else clear_coordinates
+        level_blocked = blocked if active_zone_count else []
+        level_must_clip = must_clip if active_zone_count else not _inside_allowed(clear_line, allowed, level_blocked)
+        ordered = level_coordinates if orbit or level_index % 2 else list(reversed(level_coordinates))
+        parts = [ordered] if not level_must_clip else _safe_line_parts(LineString(ordered), allowed, level_blocked)
         if not parts:
             raise POIPlanningError(
                 f"Höhenebene {level_index} hat außerhalb der Sperr- und Flugbereiche keine sichere Aufnahmebahn."
@@ -649,17 +744,38 @@ def plan_poi_route(
         for part_index, band_coordinates in enumerate(parts):
             if len(band_coordinates) < 2:
                 continue
+            transition_coordinates = []
+            transition = False
+            connection_blocked = [
+                zone for zone, height in zip(blocked, zone_heights)
+                if previous_altitude is None or min(previous_altitude, altitude) <= height + 0.5
+            ]
+            if previous_coordinates and not _smooth_connection_is_safe(
+                previous_coordinates, band_coordinates, allowed, connection_blocked
+            ):
+                transition_coordinates = _smooth_connection_helpers(
+                    previous_coordinates, band_coordinates, allowed, connection_blocked
+                )
+                # A separate mission is the last resort.  Normally a single
+                # local steering point retains the merged POI height bands.
+                transition = transition_coordinates is None
+                if transition:
+                    transition_coordinates = []
+            route_coordinates = transition_coordinates + list(band_coordinates)
             waypoints = []
-            for x, y in band_coordinates:
+            for point_index, (x, y) in enumerate(route_coordinates):
                 lat, lon = _to_geographic(x, y, origin_lat, origin_lon)
                 target_x, target_y = (center.x, center.y) if orbit else (x - normal[0] * effective_distance, y - normal[1] * effective_distance)
                 yaw = (math.degrees(math.atan2(target_x - x, target_y - y)) + 360) % 360
                 horizontal_distance = math.hypot(target_x - x, target_y - y)
                 pitch = math.degrees(math.atan2(target_height - altitude, horizontal_distance))
-                waypoints.append(POIWaypoint(lat, lon, altitude, max(-90.0, min(0.0, pitch)), yaw, level_index, "capture"))
+                kind = "transition" if point_index < len(transition_coordinates) else "capture"
+                waypoints.append(POIWaypoint(lat, lon, altitude, max(-90.0, min(0.0, pitch)), yaw, level_index, kind))
             if len(waypoints) >= 2:
                 levels.append(tuple(waypoints))
-                separate_before.append(bool(part_index))
+                separate_before.append(transition)
+                previous_coordinates = route_coordinates
+                previous_altitude = altitude
 
     # Facade bands end at the top edge and therefore do not cover a roof. An
     # orbit can add one pass above the object, but never violates the configured
@@ -669,22 +785,45 @@ def plan_poi_route(
     if orbit and max_altitude_m > object_height_m + 1e-6:
         roof_altitude = min(max_altitude_m, object_height_m + max(2.0, spacing))
         roof_level_index = len(levels) + 1
-        roof_parts = [coordinates] if not must_clip else _safe_line_parts(LineString(coordinates), allowed, blocked)
+        roof_active_zone_count = sum(roof_altitude <= height + 0.5 for height in zone_heights)
+        roof_coordinates = coordinates if roof_active_zone_count else clear_coordinates
+        roof_blocked = blocked if roof_active_zone_count else []
+        roof_must_clip = must_clip if roof_active_zone_count else not _inside_allowed(clear_line, allowed, roof_blocked)
+        roof_parts = [roof_coordinates] if not roof_must_clip else _safe_line_parts(LineString(roof_coordinates), allowed, roof_blocked)
         if not roof_parts:
             raise POIPlanningError("Die Dach-Höhenebene hat keine sichere Aufnahmebahn.")
         for roof_part_index, roof_coordinates in enumerate(roof_parts):
+            transition_coordinates = []
+            transition = False
+            connection_blocked = [
+                zone for zone, height in zip(blocked, zone_heights)
+                if previous_altitude is None or min(previous_altitude, roof_altitude) <= height + 0.5
+            ]
+            if previous_coordinates and not _smooth_connection_is_safe(
+                previous_coordinates, roof_coordinates, allowed, connection_blocked
+            ):
+                transition_coordinates = _smooth_connection_helpers(
+                    previous_coordinates, roof_coordinates, allowed, connection_blocked
+                )
+                transition = transition_coordinates is None
+                if transition:
+                    transition_coordinates = []
+            route_coordinates = transition_coordinates + list(roof_coordinates)
             roof_waypoints = []
-            for x, y in roof_coordinates:
+            for point_index, (x, y) in enumerate(route_coordinates):
                 lat, lon = _to_geographic(x, y, origin_lat, origin_lon)
                 horizontal_distance = math.hypot(center.x - x, center.y - y)
                 yaw = (math.degrees(math.atan2(center.x - x, center.y - y)) + 360) % 360
                 pitch = -math.degrees(math.atan2(roof_altitude - object_height_m, horizontal_distance))
                 roof_waypoints.append(POIWaypoint(
-                    lat, lon, roof_altitude, max(-90.0, min(0.0, pitch)), yaw, roof_level_index, "roof_capture"
+                    lat, lon, roof_altitude, max(-90.0, min(0.0, pitch)), yaw, roof_level_index,
+                    "transition" if point_index < len(transition_coordinates) else "roof_capture"
                 ))
             if len(roof_waypoints) >= 2:
                 levels.append(tuple(roof_waypoints))
-                separate_before.append(bool(roof_part_index))
+                separate_before.append(transition)
+                previous_coordinates = route_coordinates
+                previous_altitude = roof_altitude
     if top_down_roof_scan and max_altitude_m >= object_height_m + distance_m:
         # Reuse the established terrain scan path generator: alternating rows,
         # proper U-turns and optional exterior overshoot points. It remains a

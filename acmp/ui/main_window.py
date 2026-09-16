@@ -234,7 +234,7 @@ const importedMissionLayers = new Map();
 let overshootZoneLayer = L.layerGroup().addTo(map);
 let geozoneConflictLayer = L.layerGroup().addTo(map);
 let poi3dData=null, poi3dActive=false, poi3dScene=null, poi3dRenderer=null, poi3dCamera=null, poi3dControls=null, poi3dRenderToken=0, poi3dMarkerScale=.7, poi3dGroundMode='current', activeBase='normal';
-const poi3dContainer=document.createElement('div'); poi3dContainer.className='acmp-3d-view'; poi3dContainer.innerHTML='<div class="acmp-3d-scale">Markierungsgröße <input id="acmp-3d-scale" type="range" min="35" max="140" value="70"> <span id="acmp-3d-scale-value">70%</span><br><select id="acmp-3d-ground" title="Kartenunterlage auf dem Boden"><option value="current">Bodenkarte: aktuell</option><option value="normal">Bodenkarte: Karte</option><option value="satellite">Bodenkarte: Satellit</option><option value="off">Bodenkarte: aus</option></select></div><div class="acmp-3d-hint">Linke Maustaste: drehen · Mausrad: zoomen · rechte Maustaste: verschieben<hr style="border:0;border-top:1px solid #cbd5e1;margin:6px 0"><b>Lokale Achsen</b> · Ursprung: WP 1<br><span style="color:#dc2626">X</span> Ost · <span style="color:#16a34a">Y</span> Höhe · <span style="color:#2563eb">−Z</span> Nord<br><span id="acmp-3d-map-attribution" style="display:none;color:#475569"></span></div>'; document.body.appendChild(poi3dContainer);
+const poi3dContainer=document.createElement('div'); poi3dContainer.className='acmp-3d-view'; poi3dContainer.innerHTML='<div class="acmp-3d-scale">Markierungsgröße <input id="acmp-3d-scale" type="range" min="35" max="140" value="70"> <span id="acmp-3d-scale-value">70%</span><br><select id="acmp-3d-ground" title="Kartenunterlage auf dem Boden"><option value="current">Bodenkarte: aktuell</option><option value="normal">Bodenkarte: Karte</option><option value="satellite">Bodenkarte: Satellit</option><option value="off">Bodenkarte: aus</option></select></div><div class="acmp-3d-hint">Linke Maustaste: drehen · Mausrad: zoomen · rechte Maustaste: verschieben<hr style="border:0;border-top:1px solid #cbd5e1;margin:6px 0"><b>Lokale Achsen</b> · Ursprung: WP 1<br><span style="color:#dc2626">X</span> Ost · <span style="color:#16a34a">Y</span> Höhe · <span style="color:#2563eb">−Z</span> Nord<br><span style="color:#15803d">Grüner Text</span>: Missionsstart · <span style="color:#dc2626">roter Text</span>: Missionsende<br><span id="acmp-3d-map-attribution" style="display:none;color:#475569"></span></div>'; document.body.appendChild(poi3dContainer);
 const poi3dToggle=document.createElement('button'); poi3dToggle.className='acmp-3d-toggle'; poi3dToggle.textContent='3D-Ansicht'; poi3dToggle.style.display='none'; document.body.appendChild(poi3dToggle);
 document.getElementById('acmp-3d-scale').oninput=event=>{poi3dMarkerScale=Number(event.target.value)/100;document.getElementById('acmp-3d-scale-value').textContent=`${event.target.value}%`;if(poi3dActive)buildPoi3D();};
 document.getElementById('acmp-3d-ground').onchange=event=>{poi3dGroundMode=event.target.value;if(poi3dActive)buildPoi3D();};
@@ -505,20 +505,21 @@ function poi3dLocal(point, origin){
   return new THREE.Vector3((point.lon-origin[1])*lonScale,point.altitude||0,-(point.lat-origin[0])*latScale);
 }
 function poi3dGround(point, origin){ return poi3dLocal({lat:point[0],lon:point[1],altitude:0},origin); }
-function poi3dLabel(text, color){
-  const canvas=document.createElement('canvas'); canvas.width=128; canvas.height=128;
-  const c=canvas.getContext('2d'); c.beginPath(); c.arc(64,64,43,0,Math.PI*2); c.fillStyle='rgba(255,255,255,.95)'; c.fill(); c.lineWidth=7; c.strokeStyle=color; c.stroke(); c.fillStyle='#172b4d'; c.font='bold 34px Segoe UI,Arial'; c.textAlign='center'; c.textBaseline='middle'; c.fillText(text,64,66);
-  const sprite=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(canvas),depthTest:false})); const size=2.8*poi3dMarkerScale; sprite.scale.set(size,size,1); return sprite;
+function poi3dWaypointLabel(entries){
+  const canvas=document.createElement('canvas'), lineHeight=30; canvas.width=160; canvas.height=Math.max(64,entries.length*lineHeight+22);
+  const c=canvas.getContext('2d'); c.fillStyle='rgba(255,255,255,.94)'; c.strokeStyle='#64748b'; c.lineWidth=5; c.beginPath();c.roundRect(4,4,canvas.width-8,canvas.height-8,18);c.fill();c.stroke();c.font='bold 25px Segoe UI,Arial';c.textAlign='center';c.textBaseline='middle';
+  entries.forEach((entry,index)=>{c.fillStyle=entry.end?'#dc2626':(entry.start?'#15803d':(entry.color||'#172b4d'));c.fillText(entry.id,80,22+index*lineHeight);});
+  const sprite=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(canvas),depthTest:false})), width=3.8*poi3dMarkerScale; sprite.scale.set(width,width*canvas.height/canvas.width,1); return sprite;
 }
-function poi3dPolygon(points, origin, color, opacity, height=0){
+function poi3dPolygon(points, origin, color, opacity, height=0, baseHeight=0){
   if(!points || points.length<3)return null;
   // The scene uses X=east and Z=-north.  Reuse that exact Z value for the
   // Shape, otherwise only the extruded surfaces would be mirrored.
   const shape=new THREE.Shape(points.map(p=>{const v=poi3dGround(p,origin);return new THREE.Vector2(v.x,v.z);}));
   const geometry=height>0?new THREE.ExtrudeGeometry(shape,{depth:height,bevelEnabled:false}):new THREE.ShapeGeometry(shape);
-  geometry.rotateX(Math.PI/2); if(height>0) geometry.translate(0,height,0);
+  geometry.rotateX(Math.PI/2); geometry.translate(0,baseHeight+(height>0?height:0),0);
   const mesh=new THREE.Mesh(geometry,new THREE.MeshStandardMaterial({color,transparent:true,opacity,side:THREE.DoubleSide,depthWrite:false})); poi3dScene.add(mesh);
-  const outline=points.concat([points[0]]).map(p=>poi3dGround(p,origin)); if(height>0){const top=outline.map(v=>new THREE.Vector3(v.x,height,v.z)); poi3dScene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(top),new THREE.LineBasicMaterial({color,transparent:true,opacity:.9})));}
+  const outline=points.concat([points[0]]).map(p=>{const v=poi3dGround(p,origin);v.y=baseHeight;return v;}); if(height>0){const top=outline.map(v=>new THREE.Vector3(v.x,baseHeight+height,v.z)); poi3dScene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(top),new THREE.LineBasicMaterial({color,transparent:true,opacity:.9})));}
   poi3dScene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(outline),new THREE.LineBasicMaterial({color,transparent:true,opacity:.9})));
   return mesh;
 }
@@ -570,28 +571,30 @@ function buildPoi3D(){
   poi3dCamera=new THREE.PerspectiveCamera(48,Math.max(1,poi3dContainer.clientWidth)/Math.max(1,poi3dContainer.clientHeight),.1,5000);
   poi3dRenderer=new THREE.WebGLRenderer({antialias:true,alpha:true}); poi3dRenderer.setPixelRatio(Math.min(window.devicePixelRatio,2)); poi3dRenderer.setSize(poi3dContainer.clientWidth,poi3dContainer.clientHeight); poi3dRenderer.outputEncoding=THREE.sRGBEncoding; poi3dContainer.appendChild(poi3dRenderer.domElement);
   poi3dScene.add(new THREE.HemisphereLight(0xffffff,0x718096,1.35)); const light=new THREE.DirectionalLight(0xffffff,.85); light.position.set(80,150,100); poi3dScene.add(light);
-  const all=missions.flatMap(m=>m.waypoints), groundPoints=[...(poi3dData.poi||[]),...(poi3dData.flightAreas||[]).flat(),...all.map(w=>[w.lat,w.lon])];
+  const all=missions.flatMap(m=>m.waypoints), groundPoints=[...(poi3dData.poi||[]),...(poi3dData.flightAreas||[]).flat(),...(poi3dData.noFlyZones||[]).flatMap(zone=>zone.points||[]),...all.map(w=>[w.lat,w.lon])];
   const geographicPoints=groundPoints.map(point=>Array.isArray(point)?{lat:point[0],lon:point[1]}:point);
   const groundMapPoints=[...(poi3dData.flightAreas||[]).flat(),...(poi3dData.poi||[])].map(point=>({lat:point[0],lon:point[1]}));
-  const bounds=groundPoints.map(p=>Array.isArray(p)?poi3dGround(p,origin):poi3dLocal(p,origin)); let radius=20; bounds.forEach(p=>radius=Math.max(radius,Math.abs(p.x),Math.abs(p.z),p.y));
+  const bounds=groundPoints.map(p=>Array.isArray(p)?poi3dGround(p,origin):poi3dLocal(p,origin)); let radius=20; bounds.forEach(p=>radius=Math.max(radius,Math.abs(p.x),Math.abs(p.z),p.y)); (poi3dData.noFlyZones||[]).forEach(zone=>radius=Math.max(radius,Number(zone.height)||0));
   const grid=new THREE.GridHelper(Math.max(40,radius*2.4),16,0x94a3b8,0xcbd5e1); poi3dScene.add(grid);
   poi3dAddGroundMap(groundMapPoints.length?groundMapPoints:geographicPoints,origin,poi3dScene);
   poi3dAxis(origin,radius);
-  (poi3dData.flightAreas||[]).forEach(area=>poi3dPolygon(area,origin,0x38bdf8,.16,0));
+  (poi3dData.flightAreas||[]).forEach(area=>poi3dPolygon(area,origin,0x38bdf8,.25,0,.08));
+  (poi3dData.noFlyZones||[]).forEach((zone,index)=>{const height=Math.max(0,Number(zone.height)||0);poi3dPolygon(zone.points,origin,0xdc2626,.20,height,.02);if(zone.points&&zone.points.length){const center=zone.points.reduce((sum,point)=>[sum[0]+point[0]/zone.points.length,sum[1]+point[1]/zone.points.length],[0,0]),label=poi3dWaypointLabel([{id:`Sperrgebiet ${index+1}`,color:'#dc2626'},{id:`${height.toFixed(0)} m`,color:'#dc2626'}]);label.position.copy(poi3dLocal({lat:center[0],lon:center[1],altitude:height+1},origin));poi3dScene.add(label);}});
   poi3dPolygon(poi3dData.poi||[],origin,0xa855f7,.28,Math.max(0,poi3dData.objectHeight||0));
-  const colors=[0xd13c10,0x7b3fb2,0x087f5b,0x9a6700,0x1261a0];
+  const colors=[0xd13c10,0x7b3fb2,0x087f5b,0x9a6700,0x1261a0], waypointLabels=new Map();
   missions.forEach((mission,missionIndex)=>{
     const color=colors[missionIndex%colors.length], points=mission.waypoints.map(w=>poi3dLocal(w,origin));
     let path=points; if(poi3dData.smooth && points.length>2){path=new THREE.CatmullRomCurve3(points,false,'centripetal').getPoints(Math.max(20,points.length*12));}
     poi3dScene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(path),new THREE.LineBasicMaterial({color,linewidth:2})));
     points.forEach((point,index)=>{
-      const label=poi3dLabel(`${missionIndex+1}.${index+1}`,`#${color.toString(16).padStart(6,'0')}`); label.position.copy(point); poi3dScene.add(label);
+      const key=`${point.x.toFixed(2)}:${point.y.toFixed(2)}:${point.z.toFixed(2)}`, entry={id:`${missionIndex+1}.${index+1}`,start:index===0,end:index===points.length-1,point}; if(!waypointLabels.has(key))waypointLabels.set(key,[]);waypointLabels.get(key).push(entry);
       const waypoint=mission.waypoints[index], yaw=(waypoint.yaw||0)*Math.PI/180, pitch=(waypoint.gimbalPitch||0)*Math.PI/180;
       const direction=new THREE.Vector3(Math.sin(yaw)*Math.cos(pitch),Math.sin(pitch),-Math.cos(yaw)*Math.cos(pitch)).normalize();
       const arrowSize=Math.max(2.2,Math.min(5.5,radius*.075))*poi3dMarkerScale;
       const arrow=new THREE.ArrowHelper(direction,point.clone(),arrowSize,color,Math.max(.7,arrowSize*.28),Math.max(.35,arrowSize*.15)); poi3dScene.add(arrow);
     });
   });
+  waypointLabels.forEach(entries=>{const label=poi3dWaypointLabel(entries);label.position.copy(entries[0].point);poi3dScene.add(label);});
   poi3dCamera.position.set(radius*1.25,Math.max(35,radius*.95),radius*1.35);
   poi3dControls=new THREE.OrbitControls(poi3dCamera,poi3dRenderer.domElement); poi3dControls.target.set(0,(poi3dData.objectHeight||0)*.38,0); poi3dControls.enableDamping=true; poi3dControls.dampingFactor=.09; poi3dControls.maxPolarAngle=Math.PI*.49;
   const token=++poi3dRenderToken; const render=()=>{if(!poi3dActive || token!==poi3dRenderToken)return; poi3dControls.update(); poi3dRenderer.render(poi3dScene,poi3dCamera); requestAnimationFrame(render);}; render();
@@ -686,6 +689,9 @@ class MainWindow(QMainWindow):
         self.flight_area_names: list[str] = []
         self.no_fly_zones: list[list[list[float]]] = []
         self.no_fly_names: list[str] = []
+        # Each zone blocks airspace from ground level up to this altitude.
+        # 120 m is the configured operational ceiling for this planner.
+        self.no_fly_heights_m: list[float] = []
         self.poi_area: list[list[float]] = []
         self.mission_mode = "terrain"
         self._map_ready = False
@@ -1012,9 +1018,24 @@ class MainWindow(QMainWindow):
         no_fly_layout.addWidget(cancel_no_fly)
         self.zone_list = QListWidget()
         self.zone_list.setMinimumHeight(95)
-        self.zone_list.currentRowChanged.connect(lambda row: self.js(f"selectNoFly({row})"))
+        self.zone_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.zone_list.currentRowChanged.connect(self._select_no_fly_zone)
         self.zone_list.itemDoubleClicked.connect(self.rename_no_fly_zone)
         no_fly_layout.addWidget(self.zone_list)
+        self.no_fly_height = self._number(120, 0, 500, 1, " m", decimals=0)
+        self.no_fly_height.setToolTip("Sperrgebiet gilt vom Boden bis zu dieser Höhe.")
+        self.no_fly_height.setKeyboardTracking(False)
+        apply_no_fly_height = QPushButton("Aktualisieren")
+        apply_no_fly_height.clicked.connect(self._apply_no_fly_height)
+        no_fly_height_controls = QWidget()
+        no_fly_height_controls_layout = QHBoxLayout(no_fly_height_controls)
+        no_fly_height_controls_layout.setContentsMargins(0, 0, 0, 0)
+        no_fly_height_controls_layout.setSpacing(6)
+        no_fly_height_controls_layout.addWidget(self.no_fly_height)
+        no_fly_height_controls_layout.addWidget(apply_no_fly_height)
+        no_fly_height_form = QFormLayout()
+        no_fly_height_form.addRow("Sperrgebiet bis Höhe:", no_fly_height_controls)
+        no_fly_layout.addLayout(no_fly_height_form)
         delete_zone = QPushButton("Ausgewähltes Sperrgebiet löschen")
         delete_zone.clicked.connect(self.delete_selected_no_fly)
         no_fly_layout.addWidget(delete_zone)
@@ -2272,11 +2293,13 @@ class MainWindow(QMainWindow):
             destination = destination.with_suffix(".acmp.json")
         project = {
             "format": "ACMP project",
-            "version": 4,
+            "version": 5,
             "active_zone": self.points,
             "flight_areas": self.flight_areas,
             "flight_area_names": self.flight_area_names,
             "no_fly_zones": self.no_fly_zones,
+            "no_fly_names": self.no_fly_names,
+            "no_fly_heights_m": self.no_fly_heights_m,
             "poi_area": self.poi_area,
             "flight_settings": self._preset_values(),
             "export_settings": {
@@ -2305,9 +2328,9 @@ class MainWindow(QMainWindow):
             self.save_project_as()
             return
         project = {
-            "format": "ACMP project", "version": 4, "active_zone": self.points,
+            "format": "ACMP project", "version": 5, "active_zone": self.points,
             "flight_areas": self.flight_areas, "flight_area_names": self.flight_area_names,
-            "no_fly_zones": self.no_fly_zones, "poi_area": self.poi_area, "flight_settings": self._preset_values(),
+            "no_fly_zones": self.no_fly_zones, "no_fly_names": self.no_fly_names, "no_fly_heights_m": self.no_fly_heights_m, "poi_area": self.poi_area, "flight_settings": self._preset_values(),
             "export_settings": {
                 "mission_name": self.mission_name.text(), "thumbnail_title": self.thumbnail_title.text(), "rc_custom_mission_name": self.rc_custom_mission_name.text(), "base_layer": self.base_layer.currentText(),
                 "geozones_enabled": self.geozones_toggle.isChecked(), "local_rules_enabled": self.local_rules_toggle.isChecked(),
@@ -2360,7 +2383,7 @@ class MainWindow(QMainWindow):
 
     def new_project(self):
         self.current_project_path = None
-        self.points, self.flight_areas, self.flight_area_names, self.no_fly_zones, self.no_fly_names = [], [], [], [], []
+        self.points, self.flight_areas, self.flight_area_names, self.no_fly_zones, self.no_fly_names, self.no_fly_heights_m = [], [], [], [], [], []
         self.generated_route, self.generated_missions = [], []
         self.generated_poi_plan = None
         self.generated_poi_missions = []
@@ -2428,6 +2451,11 @@ class MainWindow(QMainWindow):
         self.flight_areas, self.no_fly_zones, self.poi_area = areas, zones, poi_area
         self.flight_area_names = [str(name) for name in project.get("flight_area_names", [])]
         self.flight_area_names = (self.flight_area_names + [f"Flugbereich {index}" for index in range(len(self.flight_area_names) + 1, len(areas) + 1)])[:len(areas)]
+        self.no_fly_names = [str(name) for name in project.get("no_fly_names", [])]
+        self.no_fly_names = (self.no_fly_names + [f"Sperrgebiet {index}" for index in range(len(self.no_fly_names) + 1, len(zones) + 1)])[:len(zones)]
+        raw_zone_heights = project.get("no_fly_heights_m", [])
+        self.no_fly_heights_m = [float(value) for value in raw_zone_heights] if isinstance(raw_zone_heights, list) else []
+        self.no_fly_heights_m = (self.no_fly_heights_m + [120.0] * max(0, len(zones) - len(self.no_fly_heights_m)))[:len(zones)]
         self.points = areas[0] if areas else []
         self.current_project_path = Path(filename)
         self.generated_route, self.generated_missions = route, missions
@@ -2632,6 +2660,13 @@ class MainWindow(QMainWindow):
         return {
             "poi": self.poi_area,
             "flightAreas": self.flight_areas,
+            "noFlyZones": [
+                {
+                    "points": zone,
+                    "height": self.no_fly_heights_m[index] if index < len(self.no_fly_heights_m) else 120.0,
+                }
+                for index, zone in enumerate(self.no_fly_zones)
+            ],
             "objectHeight": self.poi_object_height.value(),
             "smooth": self.poi_flight_path_preview.isChecked(),
             "missions": [
@@ -3302,12 +3337,15 @@ class MainWindow(QMainWindow):
         self.zone_list.clear()
         for index, zone in enumerate(self.no_fly_zones, start=1):
             name = self.no_fly_names[index-1] if index <= len(self.no_fly_names) else f"Sperrgebiet {index}"
-            self.zone_list.addItem(f"{name} · {polygon_area_m2(zone):,.0f} m²".replace(",", "."))
+            height = self.no_fly_heights_m[index - 1] if index <= len(self.no_fly_heights_m) else 120.0
+            self.zone_list.addItem(f"{name} · {polygon_area_m2(zone):,.0f} m² · bis {height:.0f} m".replace(",", "."))
+        self._sync_no_fly_height_editor()
         self._update_zone_summary()
 
     def _no_fly_changed(self, zones: list):
         self.no_fly_zones = zones
         self.no_fly_names = (self.no_fly_names + [f"Sperrgebiet {index}" for index in range(len(self.no_fly_names)+1, len(zones)+1)])[:len(zones)]
+        self.no_fly_heights_m = (self.no_fly_heights_m + [120.0] * max(0, len(zones) - len(self.no_fly_heights_m)))[:len(zones)]
         self.generated_route = []
         self.generated_missions = []
         self.generated_poi_plan = None
@@ -3315,6 +3353,39 @@ class MainWindow(QMainWindow):
         if hasattr(self, "force_one_button"):
             self.force_one_button.setVisible(False)
         self.js("clearMission()")
+        self._refresh_geometry_ui()
+
+    def _select_no_fly_zone(self, row: int):
+        self.js(f"selectNoFly({row})")
+        self._sync_no_fly_height_editor()
+
+    def _sync_no_fly_height_editor(self):
+        if not hasattr(self, "no_fly_height"):
+            return
+        row = self.zone_list.currentRow()
+        self.no_fly_height.blockSignals(True)
+        self.no_fly_height.setEnabled(0 <= row < len(self.no_fly_heights_m))
+        if 0 <= row < len(self.no_fly_heights_m):
+            self.no_fly_height.setValue(self.no_fly_heights_m[row])
+        self.no_fly_height.blockSignals(False)
+
+    def _apply_no_fly_height(self):
+        rows = sorted({item.row() for item in self.zone_list.selectedIndexes()})
+        if not rows:
+            row = self.zone_list.currentRow()
+            rows = [row] if row >= 0 else []
+        if not rows:
+            return
+        value = float(self.no_fly_height.value())
+        for row in rows:
+            if row < len(self.no_fly_heights_m):
+                self.no_fly_heights_m[row] = value
+        self.generated_route = []
+        self.generated_missions = []
+        self.generated_poi_plan = None
+        self.generated_poi_missions = []
+        self.generated_poi_waypoint_missions = []
+        self.js("clearMission(); clearPoi3D()")
         self._refresh_geometry_ui()
 
     def _poi_changed(self, area: list):
@@ -3363,6 +3434,10 @@ class MainWindow(QMainWindow):
     def delete_selected_no_fly(self):
         row = self.zone_list.currentRow()
         if row >= 0:
+            if row < len(self.no_fly_heights_m):
+                self.no_fly_heights_m.pop(row)
+            if row < len(self.no_fly_names):
+                self.no_fly_names.pop(row)
             self.js(f"deleteNoFly({row})")
 
     def rename_no_fly_zone(self, item):
@@ -3378,14 +3453,21 @@ class MainWindow(QMainWindow):
         area = area or self.points
         if self._canonical(self.direction_mode.currentText()) == "Optimal (kürzeste Flugzeit)":
             self.statusBar().showMessage("Optimiere Bahnausrichtung …")
-            angle = shortest_route_direction_deg(area, self.path_spacing.value(), self.no_fly_zones)
+            angle = shortest_route_direction_deg(area, self.path_spacing.value(), self._active_no_fly_zones(self.altitude.value()))
             self.direction.setValue(angle)
             return angle
         return self.direction.value()
 
+    def _active_no_fly_zones(self, altitude_m: float) -> list[list[list[float]]]:
+        """Zones apply from ground to their configured ceiling plus 0.5 m."""
+        return [
+            zone for index, zone in enumerate(self.no_fly_zones)
+            if altitude_m <= (self.no_fly_heights_m[index] if index < len(self.no_fly_heights_m) else 120.0) + 0.5
+        ]
+
     def _coverage_routes(self) -> list[list[list[float]]]:
         """Plan each drawn flight area independently; never join separate areas."""
-        zones = [] if self.no_fly_mode.currentText() == "Sperrgebiet durchfliegen" else self.no_fly_zones
+        zones = [] if self.no_fly_mode.currentText() == "Sperrgebiet durchfliegen" else self._active_no_fly_zones(self.altitude.value())
         mode = self._canonical(self.route_mode.currentText())
         use_overshoot = mode == "Overshooting"
         self.overshoot_paths = []
@@ -3624,6 +3706,7 @@ class MainWindow(QMainWindow):
             outside_choice = self.outside_area_mode.currentText()
             plan = plan_poi_route(
                 self.poi_area, self.flight_areas, self.no_fly_zones,
+                no_fly_heights_m=self.no_fly_heights_m,
                 capture_type=self._canonical(self.poi_capture_type.currentText()),
                 facade_bearing_deg=self.poi_facade_bearing.value(),
                 orbit_clockwise=self._canonical(self.poi_orbit_direction.currentText()) == "Uhrzeigersinn",
@@ -4101,13 +4184,33 @@ class MainWindow(QMainWindow):
             for point_number, point in enumerate(mission, 1):
                 if enforce_area and not any(self._point_in_polygon(point, area) for area in self.flight_areas):
                     errors.append(f"Mission {mission_number}, WP {point_number}: außerhalb des Flugbereichs")
-                if enforce_zones and any(self._point_in_polygon(point, zone) for zone in self.no_fly_zones):
+                altitude = (
+                    self.generated_poi_waypoint_missions[mission_number - 1][point_number - 1].altitude_m
+                    if self.mission_mode == "poi" and mission_number <= len(self.generated_poi_waypoint_missions)
+                    and point_number <= len(self.generated_poi_waypoint_missions[mission_number - 1])
+                    else self.altitude.value()
+                )
+                if enforce_zones and any(
+                    altitude <= (self.no_fly_heights_m[index] if index < len(self.no_fly_heights_m) else 120.0) + 0.5
+                    and self._point_in_polygon(point, zone)
+                    for index, zone in enumerate(self.no_fly_zones)
+                ):
                     errors.append(f"Mission {mission_number}, WP {point_number}: im Sperrgebiet")
-            for first, second in zip(mission, mission[1:]):
+            for segment_index, (first, second) in enumerate(zip(mission, mission[1:])):
+                segment_altitude = (
+                    self.generated_poi_waypoint_missions[mission_number - 1][segment_index].altitude_m
+                    if self.mission_mode == "poi" and mission_number <= len(self.generated_poi_waypoint_missions)
+                    and segment_index < len(self.generated_poi_waypoint_missions[mission_number - 1])
+                    else self.altitude.value()
+                )
                 for step in range(1, 25):
                     sample=[first[0]+(second[0]-first[0])*step/25, first[1]+(second[1]-first[1])*step/25]
                     if enforce_area and not any(self._point_in_polygon(sample, area) for area in self.flight_areas): errors.append(f"Mission {mission_number}: Strecke verlässt Flugbereich"); break
-                    if enforce_zones and any(self._point_in_polygon(sample, zone) for zone in self.no_fly_zones): errors.append(f"Mission {mission_number}: Strecke kreuzt Sperrgebiet"); break
+                    if enforce_zones and any(
+                        segment_altitude <= (self.no_fly_heights_m[index] if index < len(self.no_fly_heights_m) else 120.0) + 0.5
+                        and self._point_in_polygon(sample, zone)
+                        for index, zone in enumerate(self.no_fly_zones)
+                    ): errors.append(f"Mission {mission_number}: Strecke kreuzt Sperrgebiet"); break
         return list(dict.fromkeys(errors))
 
     def export_kmz_file(self):
