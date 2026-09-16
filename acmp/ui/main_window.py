@@ -83,6 +83,7 @@ UI_EN = {
     "Vorschaubild mit Name speichern …": "Save preview image with name …", "Exportieren": "Export",
     "Erzeugt ein DJI-WPML-KMZ mit <code>template.kml</code> und <code>waylines.wpml</code>.": "Creates a DJI WPML KMZ with <code>template.kml</code> and <code>waylines.wpml</code>.",
     "Missionsname": "Mission name",
+    "Eigener Missionsname (optional)": "Custom mission name (optional)",
     "West → Ost (0°)": "West → East (0°)", "Ost → West (180°)": "East → West (180°)",
     "Süd → Nord (90°)": "South → North (90°)", "Nord → Süd (270°)": "North → South (270°)",
     "Eigene Gradzahl": "Custom angle", "Optimal (längste Kante)": "Optimal (longest edge)", "Optimal (längste Kante, umgekehrt)": "Optimal (longest edge, reversed)", "Optimal (kürzeste Flugzeit)": "Optimal (shortest flight time)",
@@ -389,6 +390,15 @@ function showImportedMission(id,route,label){
 }
 function removeImportedMission(id){const layer=importedMissionLayers.get(id);if(layer){importedMissionLayer.removeLayer(layer);importedMissionLayers.delete(id);}}
 function setMissionVisible(value){ if(value){ if(!map.hasLayer(missionLayer)) missionLayer.addTo(map); }else if(map.hasLayer(missionLayer)){ map.removeLayer(missionLayer); } }
+function headingBetween(from,to){
+  const east=(to[1]-from[1])*111319.49*Math.cos(from[0]*Math.PI/180), north=(to[0]-from[0])*111132.92;
+  return (Math.atan2(east,north)*180/Math.PI+360)%360;
+}
+function drawHeadingIndicator(point,heading,color,tooltip){
+  const lengthM=9, angle=heading*Math.PI/180;
+  const end=[point[0]+Math.cos(angle)*lengthM/111132.92,point[1]+Math.sin(angle)*lengthM/(111319.49*Math.cos(point[0]*Math.PI/180))];
+  L.polyline([point,end],{color,weight:3,opacity:.95}).bindTooltip(`${mapText('Blickrichtung')}: ${heading.toFixed(0)}°${tooltip?'<br>'+tooltip:''}`,{sticky:true}).addTo(missionLayer);
+}
 function showMission(route){
   showMissions([route]);
 }
@@ -415,6 +425,9 @@ function showMissions(missions, summaries=[], estimatedPaths=[], overshootPaths=
     globalIndex++;
     const icon=L.divIcon({className:'',html:`<div style="background:${color};color:white;border:2px solid white;border-radius:50%;width:22px;height:22px;line-height:22px;text-align:center;font-size:11px;font-weight:bold;box-shadow:0 1px 3px #444">${missionIndex+1}.${i+1}</div>`,iconSize:[28,22],iconAnchor:[14,11]});
     L.marker(p,{icon:icon,interactive:false}).addTo(missionLayer);
+    const headingTarget=i<route.length-1?route[i+1]:(i>0?p:null);
+    const headingStart=i<route.length-1?p:(i>0?route[i-1]:null);
+    if(headingStart && headingTarget) drawHeadingIndicator(p,headingBetween(headingStart,headingTarget),color,mapText('Flugrichtung'));
     if(i < route.length-1){
       const q=route[i+1], mid=[(p[0]+q[0])/2,(p[1]+q[1])/2];
       const dx=q[1]-p[1], dy=q[0]-p[0], rotation=Math.atan2(dx,dy)*180/Math.PI;
@@ -461,9 +474,12 @@ function showPoiLevels(levels, selectedLevel=0, estimatedPaths=[], outsideZone=n
   // reference points from level 1 visible even when all bands are displayed.
   const reference=levels[0], referenceColor='hsl(220,78%,45%)', referenceLast=reference.points[reference.points.length-1];
   const waypointPoints=(reference.points.length>2 && reference.points[0][0]===referenceLast[0] && reference.points[0][1]===referenceLast[1]) ? reference.points.slice(0,-1) : reference.points;
+  const referenceHeadings=(reference.headings || []).slice(0,waypointPoints.length);
   waypointPoints.forEach((point,waypointIndex)=>{
     const waypointIcon=L.divIcon({className:'',html:`<div style="background:white;color:${referenceColor};border:2px solid ${referenceColor};border-radius:50%;width:20px;height:20px;line-height:20px;text-align:center;font:700 10px Segoe UI,Arial;box-shadow:0 1px 3px #555">${waypointIndex+1}</div>`,iconSize:[24,20],iconAnchor:[12,10]});
     L.marker(point,{icon:waypointIcon}).bindTooltip(`${mapText('Steuerpunkt')} ${waypointIndex+1} · ${mapText('Referenz')}: ${mapText('Ebene')} 1 · ${mapText('gemeinsame Lage aller Höhenebenen')}`,{sticky:true}).addTo(missionLayer);
+    const heading=referenceHeadings[waypointIndex];
+    if(Number.isFinite(heading)) drawHeadingIndicator(point,heading,referenceColor,mapText('POI-Blickrichtung'));
   });
 }
 </script></body></html>"""
@@ -1293,6 +1309,12 @@ class MainWindow(QMainWindow):
         right_column.addWidget(self.rc_mission_table)
         rc_lists.addLayout(right_column, 1)
         rc_export_layout.addLayout(rc_lists)
+        rc_export_layout.addWidget(QLabel("Eigener Missionsname (optional)"))
+        self.rc_custom_mission_name = QLineEdit()
+        self.rc_custom_mission_name.setPlaceholderText("z. B. Turm")
+        self.rc_custom_mission_name.setToolTip("Ersetzt „Mission“ in den automatisch nummerierten Namen, z. B. „Turm 1.1“.")
+        self.rc_custom_mission_name.textChanged.connect(self._custom_mission_name_changed)
+        rc_export_layout.addWidget(self.rc_custom_mission_name)
         rc_export_buttons = QHBoxLayout()
         self.rc_import_button = QPushButton("RC Mission anzeigen")
         self.rc_import_button.setEnabled(False)
@@ -2116,6 +2138,7 @@ class MainWindow(QMainWindow):
             "export_settings": {
                 "mission_name": self.mission_name.text(),
                 "thumbnail_title": self.thumbnail_title.text(),
+                "rc_custom_mission_name": self.rc_custom_mission_name.text(),
                 "base_layer": self.base_layer.currentText(),
                 "geozones_enabled": self.geozones_toggle.isChecked(),
                 "local_rules_enabled": self.local_rules_toggle.isChecked(),
@@ -2142,7 +2165,7 @@ class MainWindow(QMainWindow):
             "flight_areas": self.flight_areas, "flight_area_names": self.flight_area_names,
             "no_fly_zones": self.no_fly_zones, "poi_area": self.poi_area, "flight_settings": self._preset_values(),
             "export_settings": {
-                "mission_name": self.mission_name.text(), "thumbnail_title": self.thumbnail_title.text(), "base_layer": self.base_layer.currentText(),
+                "mission_name": self.mission_name.text(), "thumbnail_title": self.thumbnail_title.text(), "rc_custom_mission_name": self.rc_custom_mission_name.text(), "base_layer": self.base_layer.currentText(),
                 "geozones_enabled": self.geozones_toggle.isChecked(), "local_rules_enabled": self.local_rules_toggle.isChecked(),
             },
             "generated_route": self.generated_route, "generated_missions": self.generated_missions,
@@ -2201,6 +2224,7 @@ class MainWindow(QMainWindow):
         self.poi_area = []
         self.mission_name.setText("ACMP_Mapping_Mission")
         self.thumbnail_title.clear()
+        self.rc_custom_mission_name.clear()
         self.js("clearAll(); clearMission();")
         self._refresh_geometry_ui()
         self.statusBar().showMessage("Neues Projekt erstellt.", 3000)
@@ -2237,6 +2261,7 @@ class MainWindow(QMainWindow):
                 raise ValueError("Die Export-Einstellungen sind ungültig.")
             self.mission_name.setText(str(export_settings.get("mission_name", self.mission_name.text())))
             self.thumbnail_title.setText(str(export_settings.get("thumbnail_title", self.thumbnail_title.text())))
+            self.rc_custom_mission_name.setText(str(export_settings.get("rc_custom_mission_name", "")))
             if self._canonical(str(export_settings.get("base_layer", ""))) in ("Karte", "Satellit"):
                 self.base_layer.setCurrentText(str(export_settings["base_layer"]))
             if "geozones_enabled" in export_settings:
@@ -2462,6 +2487,7 @@ class MainWindow(QMainWindow):
                 "altitude": first.altitude_m,
                 "gimbal": first.gimbal_pitch_deg,
                 "yaw": first.yaw_deg,
+                "headings": [waypoint.yaw_deg for waypoint in band],
                 "kind": first.kind,
                 "waypoints": len(band),
                 "durationText": f"{duration_s / 60:.1f}",
@@ -3631,23 +3657,28 @@ class MainWindow(QMainWindow):
             speed = capture_plan.flight_speed_mps
             altitudes = [waypoint.altitude_m for waypoint in poi_waypoints]
             pitches = [waypoint.gimbal_pitch_deg for waypoint in poi_waypoints]
+            headings = [waypoint.yaw_deg for waypoint in poi_waypoints]
             waypoint_speeds = [speed] * len(route)
         else:
             photo_mode, photo_distance, speed = self._export_photo_mode(), self.photo_distance.value(), self._effective_speed()
-            altitudes = pitches = None
+            altitudes = pitches = headings = None
             waypoint_speeds = self._waypoint_speeds(route)
         build_dji_kmz(
             destination, route, self.altitude.value(), speed, self.gimbal_pitch.value(),
             photo_mode, photo_distance, self.route_mode.currentText(),
             finish_actions[self._canonical(self.finish_action.currentText())], signal_loss_actions[self._canonical(self.signal_loss_action.currentText())],
             waypoint_speeds, self._drone_capabilities().supports_wpml_gimbal_pitch,
-            waypoint_altitudes=altitudes, waypoint_gimbal_pitches=pitches,
+            waypoint_altitudes=altitudes, waypoint_gimbal_pitches=pitches, waypoint_headings=headings,
         )
         return True
 
     def _mission_preview_codes_for(self, missions) -> list[str]:
         """Name independent areas and their split parts consistently."""
-        key = tuple(tuple((round(point[0], 8), round(point[1], 8)) for point in mission) for mission in missions)
+        custom_name = self.rc_custom_mission_name.text().strip() if hasattr(self, "rc_custom_mission_name") else ""
+        key = (
+            custom_name,
+            tuple(tuple((round(point[0], 8), round(point[1], 8)) for point in mission) for mission in missions),
+        )
         if key == self._mission_preview_code_key:
             return self._mission_preview_codes
         if self.mission_mode == "poi":
@@ -3677,7 +3708,7 @@ class MainWindow(QMainWindow):
             part_numbers[group] = part_numbers.get(group, 0) + 1
             number = group_numbers[group]
             suffix = f".{part_numbers[group]}" if group_sizes[group] > 1 else ""
-            codes.append(f"Mission {number}{suffix}")
+            codes.append(f"{custom_name or 'Mission'} {number}{suffix}")
         self._mission_preview_code_key, self._mission_preview_codes = key, codes
         return codes
 
@@ -3901,6 +3932,13 @@ class MainWindow(QMainWindow):
         else:
             message = f"{len(missions)} DJI-WPML-KMZ-Teilmissionen gespeichert:\n{destination.parent}"
         QMessageBox.information(self, "KMZ gespeichert", message)
+
+    def _custom_mission_name_changed(self) -> None:
+        """Apply an optional name prefix without changing mission grouping."""
+        missions = self.generated_poi_missions if self.mission_mode == "poi" else self.generated_missions
+        self._refresh_rc_export_list(missions)
+        if missions and self.mission_mode != "poi":
+            self._show_missions(missions)
 
     def _refresh_rc_export_list(self, missions=None):
         if not hasattr(self, "rc_export_mission_list"):
