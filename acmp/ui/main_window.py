@@ -187,7 +187,7 @@ def canonical_ui_text(value: str) -> str:
 MAP_HTML = r"""<!DOCTYPE html>
 <html lang="de"><head><meta charset="utf-8">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<style>html,body,#map{height:100%;width:100%;margin:0}.leaflet-container{font-family:Segoe UI,Arial,sans-serif}.acmp-3d-toggle{position:absolute;z-index:1200;bottom:24px;right:12px;border:1px solid #8b5cf6;border-radius:6px;background:#fff;color:#4c1d95;padding:7px 10px;font:700 12px Segoe UI,Arial;box-shadow:0 1px 5px #555;cursor:pointer}.acmp-3d-toggle:hover{background:#f5f3ff}.acmp-3d-view{position:absolute;inset:0;z-index:1100;background:linear-gradient(#dcecf6,#f8fafc 58%,#cbd5e1);display:none;overflow:hidden}.acmp-3d-hint{position:absolute;z-index:1;bottom:16px;left:16px;color:#172b4d;background:rgba(255,255,255,.9);border:1px solid #aeb8c4;border-radius:6px;padding:7px 9px;font:12px Segoe UI,Arial;pointer-events:none}.acmp-3d-scale{position:absolute;z-index:1;top:12px;right:12px;color:#172b4d;background:rgba(255,255,255,.93);border:1px solid #aeb8c4;border-radius:6px;padding:7px 9px;font:12px Segoe UI,Arial}.acmp-3d-scale input{width:120px;vertical-align:middle}.acmp-3d-scale select{margin-top:5px;width:100%;font:12px Segoe UI,Arial}</style>
+<style>html,body,#map{height:100%;width:100%;margin:0}.leaflet-container{font-family:Segoe UI,Arial,sans-serif}.acmp-3d-toggle{position:absolute;z-index:1200;bottom:24px;right:12px;border:1px solid #8b5cf6;border-radius:6px;background:#fff;color:#4c1d95;padding:7px 10px;font:700 12px Segoe UI,Arial;box-shadow:0 1px 5px #555;cursor:pointer}.acmp-3d-toggle:hover{background:#f5f3ff}.acmp-3d-view{position:absolute;inset:0;z-index:1100;background:linear-gradient(#dcecf6,#f8fafc 58%,#cbd5e1);display:none;overflow:hidden}.acmp-3d-hint{position:absolute;z-index:1;bottom:16px;left:16px;color:#172b4d;background:rgba(255,255,255,.9);border:1px solid #aeb8c4;border-radius:6px;padding:7px 9px;font:12px Segoe UI,Arial;pointer-events:none}.acmp-3d-scale{position:absolute;z-index:1;top:12px;right:12px;color:#172b4d;background:rgba(255,255,255,.93);border:1px solid #aeb8c4;border-radius:6px;padding:7px 9px;font:12px Segoe UI,Arial;min-width:165px}.acmp-3d-scale input{width:120px;vertical-align:middle}.acmp-3d-scale select{margin-top:5px;width:100%;font:12px Segoe UI,Arial}.acmp-3d-missions{margin-top:7px;padding-top:6px;border-top:1px solid #cbd5e1}.acmp-3d-missions input{width:100%;margin:3px 0 0}</style>
 </head><body><div id="map"></div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
@@ -233,11 +233,12 @@ let importedMissionLayer = L.layerGroup().addTo(map);
 const importedMissionLayers = new Map();
 let overshootZoneLayer = L.layerGroup().addTo(map);
 let geozoneConflictLayer = L.layerGroup().addTo(map);
-let poi3dData=null, poi3dActive=false, poi3dScene=null, poi3dRenderer=null, poi3dCamera=null, poi3dControls=null, poi3dRenderToken=0, poi3dMarkerScale=.7, poi3dGroundMode='current', activeBase='normal';
-const poi3dContainer=document.createElement('div'); poi3dContainer.className='acmp-3d-view'; poi3dContainer.innerHTML='<div class="acmp-3d-scale">Markierungsgröße <input id="acmp-3d-scale" type="range" min="35" max="140" value="70"> <span id="acmp-3d-scale-value">70%</span><br><select id="acmp-3d-ground" title="Kartenunterlage auf dem Boden"><option value="current">Bodenkarte: aktuell</option><option value="normal">Bodenkarte: Karte</option><option value="satellite">Bodenkarte: Satellit</option><option value="off">Bodenkarte: aus</option></select></div><div class="acmp-3d-hint">Linke Maustaste: drehen · Mausrad: zoomen · rechte Maustaste: verschieben<hr style="border:0;border-top:1px solid #cbd5e1;margin:6px 0"><b>Lokale Achsen</b> · Ursprung: WP 1<br><span style="color:#dc2626">X</span> Ost · <span style="color:#16a34a">Y</span> Höhe · <span style="color:#2563eb">−Z</span> Nord<br><span style="color:#15803d">Grüner Text</span>: Missionsstart · <span style="color:#dc2626">roter Text</span>: Missionsende<br><span id="acmp-3d-map-attribution" style="display:none;color:#475569"></span></div>'; document.body.appendChild(poi3dContainer);
+let poi3dData=null, poi3dActive=false, poi3dScene=null, poi3dRenderer=null, poi3dCamera=null, poi3dControls=null, poi3dRenderToken=0, poi3dMarkerScale=.7, poi3dGroundMode='current', activeBase='normal', poi3dMissionFilter=0;
+const poi3dContainer=document.createElement('div'); poi3dContainer.className='acmp-3d-view'; poi3dContainer.innerHTML='<div class="acmp-3d-scale">Markierungsgröße <input id="acmp-3d-scale" type="range" min="35" max="140" value="70"> <span id="acmp-3d-scale-value">70%</span><br><select id="acmp-3d-ground" title="Kartenunterlage auf dem Boden"><option value="current">Bodenkarte: aktuell</option><option value="normal">Bodenkarte: Karte</option><option value="satellite">Bodenkarte: Satellit</option><option value="off">Bodenkarte: aus</option></select><div class="acmp-3d-missions"><b id="acmp-3d-mission-label">Alle Missionen</b><input id="acmp-3d-missions" type="range" min="0" max="0" value="0" step="1"></div></div><div class="acmp-3d-hint">Linke Maustaste: drehen · Mausrad: zoomen · rechte Maustaste: verschieben<hr style="border:0;border-top:1px solid #cbd5e1;margin:6px 0"><b>Lokale Achsen</b> · Ursprung: WP 1<br><span style="color:#dc2626">X</span> Ost · <span style="color:#16a34a">Y</span> Höhe · <span style="color:#2563eb">−Z</span> Nord<br><span style="color:#15803d">Grüner Text</span>: Missionsstart · <span style="color:#dc2626">roter Text</span>: Missionsende<br><span id="acmp-3d-map-attribution" style="display:none;color:#475569"></span></div>'; document.body.appendChild(poi3dContainer);
 const poi3dToggle=document.createElement('button'); poi3dToggle.className='acmp-3d-toggle'; poi3dToggle.textContent='3D-Ansicht'; poi3dToggle.style.display='none'; document.body.appendChild(poi3dToggle);
 document.getElementById('acmp-3d-scale').oninput=event=>{poi3dMarkerScale=Number(event.target.value)/100;document.getElementById('acmp-3d-scale-value').textContent=`${event.target.value}%`;if(poi3dActive)buildPoi3D();};
 document.getElementById('acmp-3d-ground').onchange=event=>{poi3dGroundMode=event.target.value;if(poi3dActive)buildPoi3D();};
+document.getElementById('acmp-3d-missions').oninput=event=>{poi3dMissionFilter=Number(event.target.value);document.getElementById('acmp-3d-mission-label').textContent=poi3dMissionFilter?'Mission '+poi3dMissionFilter:'Alle Missionen';if(poi3dActive)buildPoi3D();};
 function emitFlightAreas(){ console.log('ACMP_FLIGHT_AREAS:' + JSON.stringify(flightAreas)); }
 function emitNoFly(){ console.log('ACMP_NO_FLY:' + JSON.stringify(noFlyZones)); }
 function emitPoi(){ console.log('ACMP_POI:' + JSON.stringify(poiArea)); }
@@ -497,6 +498,8 @@ function clearPoi3D(){
 }
 function setPoi3DData(data){
   poi3dData=data;
+  const missionSlider=document.getElementById('acmp-3d-missions'), missionLabel=document.getElementById('acmp-3d-mission-label'), missionCount=(data&&data.missions?data.missions.filter(m=>m.waypoints&&m.waypoints.length).length:0);
+  missionSlider.max=missionCount; if(poi3dMissionFilter>missionCount)poi3dMissionFilter=0; missionSlider.value=poi3dMissionFilter; missionSlider.disabled=missionCount<2; missionLabel.textContent=poi3dMissionFilter?'Mission '+poi3dMissionFilter:'Alle Missionen';
   poi3dToggle.style.display=(data && data.missions && data.missions.some(m=>m.waypoints && m.waypoints.length))?'block':'none';
   if(poi3dActive) buildPoi3D();
 }
@@ -565,7 +568,7 @@ async function poi3dAddGroundMap(points, origin, scene){
 function buildPoi3D(){
   if(!poi3dData || !window.THREE)return;
   if(poi3dControls) poi3dControls.dispose(); if(poi3dRenderer){poi3dRenderer.dispose(); poi3dContainer.querySelectorAll('canvas').forEach(node=>node.remove());}
-  const missions=poi3dData.missions.filter(m=>m.waypoints && m.waypoints.length);
+  const allMissions=poi3dData.missions.map((mission,index)=>({...mission,number:index+1})).filter(m=>m.waypoints && m.waypoints.length), missions=poi3dMissionFilter?[allMissions[poi3dMissionFilter-1]].filter(Boolean):allMissions;
   const first=missions[0].waypoints[0], origin=[first.lat,first.lon];
   poi3dScene=new THREE.Scene();
   poi3dCamera=new THREE.PerspectiveCamera(48,Math.max(1,poi3dContainer.clientWidth)/Math.max(1,poi3dContainer.clientHeight),.1,5000);
@@ -583,11 +586,11 @@ function buildPoi3D(){
   poi3dPolygon(poi3dData.poi||[],origin,0xa855f7,.28,Math.max(0,poi3dData.objectHeight||0));
   const colors=[0xd13c10,0x7b3fb2,0x087f5b,0x9a6700,0x1261a0], waypointLabels=new Map();
   missions.forEach((mission,missionIndex)=>{
-    const color=colors[missionIndex%colors.length], points=mission.waypoints.map(w=>poi3dLocal(w,origin));
+    const color=colors[(mission.number-1)%colors.length], points=mission.waypoints.map(w=>poi3dLocal(w,origin));
     let path=points; if(poi3dData.smooth && points.length>2){path=new THREE.CatmullRomCurve3(points,false,'centripetal').getPoints(Math.max(20,points.length*12));}
     poi3dScene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(path),new THREE.LineBasicMaterial({color,linewidth:2})));
     points.forEach((point,index)=>{
-      const key=`${point.x.toFixed(2)}:${point.y.toFixed(2)}:${point.z.toFixed(2)}`, entry={id:`${missionIndex+1}.${index+1}`,start:index===0,end:index===points.length-1,point}; if(!waypointLabels.has(key))waypointLabels.set(key,[]);waypointLabels.get(key).push(entry);
+      const key=`${point.x.toFixed(2)}:${point.y.toFixed(2)}:${point.z.toFixed(2)}`, entry={id:`${mission.number}.${index+1}`,start:index===0,end:index===points.length-1,point}; if(!waypointLabels.has(key))waypointLabels.set(key,[]);waypointLabels.get(key).push(entry);
       const waypoint=mission.waypoints[index], yaw=(waypoint.yaw||0)*Math.PI/180, pitch=(waypoint.gimbalPitch||0)*Math.PI/180;
       const direction=new THREE.Vector3(Math.sin(yaw)*Math.cos(pitch),Math.sin(pitch),-Math.cos(yaw)*Math.cos(pitch)).normalize();
       const arrowSize=Math.max(2.2,Math.min(5.5,radius*.075))*poi3dMarkerScale;
