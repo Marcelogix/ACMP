@@ -7,20 +7,25 @@ benötigt; Satellitenbilder kommen von Esri World Imagery.
 from __future__ import annotations
 
 import json
+import hashlib
+import base64
+import sqlite3
+import shutil
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import math
 import threading
 import time
 import tempfile
 import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from html import escape
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, parse_qs, urlsplit
 from urllib.request import Request, urlopen
 
-from PySide6.QtCore import QSettings, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import QSettings, QTimer, QUrl, Qt, Signal, QStandardPaths
 from PySide6.QtGui import QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QPainter, QPainterPath, QPen
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEnginePermission
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEnginePermission, QWebEngineProfile
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
@@ -37,6 +42,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QProgressBar,
     QInputDialog,
     QMessageBox,
     QPushButton,
@@ -172,6 +178,75 @@ GEOZONE_LABELS = {
     "polizei": "Polizei", "temporaere_betriebseinschraenkungen": "Temporäre Betriebseinschränkungen",
     "vogelschutzgebiete": "Vogelschutzgebiete", "wohngrundstuecke": "Wohngrundstücke",
 }
+GEOZONE_WMS_PREFIX = "https://uas-betrieb.de/geoservices/dipul/wms?"
+GEOZONE_EMPTY_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL5WAAAAABJRU5ErkJggg=="
+)
+
+
+class _GeozoneTileCacheServer(ThreadingHTTPServer):
+    """Local, on-disk proxy for official WMS tiles used by the map."""
+
+    daemon_threads = True
+
+    def __init__(self, cache_dir: Path):
+        self.cache_dir = cache_dir
+        self.offline_mode = False
+        super().__init__(("127.0.0.1", 0), _GeozoneTileCacheHandler)
+
+
+class _GeozoneTileCacheHandler(BaseHTTPRequestHandler):
+    def log_message(self, _format, *_args):
+        pass
+
+    def do_GET(self):
+        parsed = urlsplit(self.path)
+        if parsed.path != "/geozone-tile":
+            self.send_error(404)
+            return
+        query = parse_qs(parsed.query)
+        source = query.get("source", [""])[0]
+        try:
+            zoom, x, y = (int(query[key][0]) for key in ("z", "x", "y"))
+        except (KeyError, ValueError, IndexError):
+            self.send_error(400)
+            return
+        if not source.startswith(GEOZONE_WMS_PREFIX) or not (0 <= zoom <= 22 and x >= 0 and y >= 0):
+            self.send_error(400)
+            return
+        version = hashlib.sha256(query.get("version", ["initial"])[0].encode()).hexdigest()[:16]
+        destination = self.server.cache_dir / version / f"{zoom}_{x}_{y}.png"
+        payload = None
+        if destination.is_file():
+            try:
+                payload = destination.read_bytes()
+            except OSError:
+                pass
+        if payload is None:
+            if self.server.offline_mode:
+                payload = GEOZONE_EMPTY_PNG
+            else:
+                try:
+                    with urlopen(Request(source, headers={"User-Agent": "ACMP/1.0"}), timeout=20) as response:
+                        payload = response.read()
+                    if payload.startswith(b"\x89PNG"):
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        destination.write_bytes(payload)
+                except Exception:
+                    # Offline: render a transparent tile rather than making the
+                    # whole Leaflet layer fail. Cached neighbours remain visible.
+                    payload = GEOZONE_EMPTY_PNG
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        try:
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionAbortedError):
+            # Leaflet may cancel tile loads while panning; the tile is already
+            # cached (if it was valid), so no console traceback is warranted.
+            pass
 LOCAL_RULE_LAYERS = {
     "Landschaftsschutzgebiete": "Landschaftsschutzgebiet",
     "Naturparke": "Naturpark",
@@ -199,6 +274,19 @@ const geozones = L.tileLayer.wms('https://uas-betrieb.de/geoservices/dipul/wms?'
   layers:'bahnanlagen,behoerden,bundesautobahnen,bundesstrassen,ffh-gebiete,flugbeschraenkungsgebiete,flughaefen,flugplaetze,industrieanlagen,kontrollzonen,krankenhaeuser,militaerische_anlagen,nationalparks,naturschutzgebiete,polizei,temporaere_betriebseinschraenkungen,vogelschutzgebiete,wohngrundstuecke',
   format:'image/png',transparent:true,version:'1.3.0',opacity:.85,attribution:'© DFS/dipul'
 });
+// The named Qt WebEngine profile backing this view persists the HTTP tile
+// cache on disk.  Leaflet therefore reuses official WMS tiles across starts.
+let geozoneCacheProxy='',geozoneVersion='initial';
+const originalGeozoneCreateTile=geozones.createTile.bind(geozones);
+geozones.createTile=function(coords,done){
+  if(!geozoneCacheProxy)return originalGeozoneCreateTile(coords,done);
+  const tile=document.createElement('img');tile.alt='';tile.setAttribute('role','presentation');
+  tile.onload=()=>done(null,tile);tile.onerror=()=>done(new Error('Geo-Zonen-Kachel konnte nicht geladen werden'),tile);
+  tile.src=`${geozoneCacheProxy}/geozone-tile?z=${coords.z}&x=${coords.x}&y=${coords.y}&version=${encodeURIComponent(geozoneVersion)}&source=${encodeURIComponent(this.getTileUrl(coords))}`;
+  return tile;
+};
+function setGeozoneCacheProxy(value){geozoneCacheProxy=value||'';}
+function setGeozoneVersion(value){geozoneVersion=value||'initial';geozones.setParams({acmp_version:geozoneVersion},false);if(map.hasLayer(geozones)){map.removeLayer(geozones);geozones.addTo(map);}}
 const map = L.map('map', {zoomControl:true, layers:[normal]}).setView([51.1657, 10.4515], 6);
 map.createPane('localRulesPane');
 map.getPane('localRulesPane').style.zIndex=350;
@@ -587,7 +675,12 @@ function buildPoi3D(){
   const colors=[0xd13c10,0x7b3fb2,0x087f5b,0x9a6700,0x1261a0], waypointLabels=new Map();
   missions.forEach((mission,missionIndex)=>{
     const color=colors[(mission.number-1)%colors.length], points=mission.waypoints.map(w=>poi3dLocal(w,origin));
-    let path=points; if(poi3dData.smooth && points.length>2){path=new THREE.CatmullRomCurve3(points,false,'centripetal').getPoints(Math.max(20,points.length*12));}
+    let path=points; if(poi3dData.smooth && points.length>2){
+      if(poi3dData.approximation==='cubic_bezier'){
+        const curve=new THREE.CurvePath();
+        for(let i=0;i<points.length-1;i++){const p0=i?points[i-1]:points[i].clone().multiplyScalar(2).sub(points[i+1]),p1=points[i],p2=points[i+1],p3=i+2<points.length?points[i+2]:p2.clone().multiplyScalar(2).sub(p1);curve.add(new THREE.CubicBezierCurve3(p1,p1.clone().add(p2.clone().sub(p0).multiplyScalar(1/6)),p2.clone().sub(p3.clone().sub(p1).multiplyScalar(1/6)),p2));} path=curve.getPoints(Math.max(20,points.length*12));
+      } else path=new THREE.CatmullRomCurve3(points,false,'centripetal').getPoints(Math.max(20,points.length*12));
+    }
     poi3dScene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(path),new THREE.LineBasicMaterial({color,linewidth:2})));
     points.forEach((point,index)=>{
       const key=`${point.x.toFixed(2)}:${point.y.toFixed(2)}:${point.z.toFixed(2)}`, entry={id:`${mission.number}.${index+1}`,start:index===0,end:index===points.length-1,point}; if(!waypointLabels.has(key))waypointLabels.set(key,[]);waypointLabels.get(key).push(entry);
@@ -620,6 +713,18 @@ class MapPage(QWebEnginePage):
     shape_completed = Signal()
     inspection_requested = Signal(list)
     local_inspection_requested = Signal(list)
+
+    def __init__(self, parent=None):
+        # An explicit named profile gives Leaflet/WMS disk cache a stable home
+        # instead of an in-memory/off-the-record page profile.
+        self._profile = QWebEngineProfile("acmp-map-cache", parent)
+        cache_root = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)) / "map-cache"
+        cache_root.mkdir(parents=True, exist_ok=True)
+        self._profile.setPersistentStoragePath(str(cache_root / "storage"))
+        self._profile.setCachePath(str(cache_root / "http"))
+        self._profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.DiskHttpCache)
+        self._profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
+        super().__init__(self._profile, parent)
 
     def javaScriptConsoleMessage(self, level, message, line_number, source_id):
         if message.startswith("ACMP_FLIGHT_AREAS:"):
@@ -676,7 +781,7 @@ from acmp.services.photogrammetry import coverage_geometry, sensor_diagonal_mm
 from acmp.services.poi_planner import POIPlanningError, POIWaypoint, plan_poi_route
 from acmp.services.drone_profiles import DRONE_PROFILES, PROFILE_BY_KEY
 from acmp.services.route_planner import (
-    add_overshoot_turns, centripetal_catmull_rom_route, count_direction_changes, densify_route, estimated_route_seconds, generate_lawnmower_route,
+    add_overshoot_turns, centripetal_catmull_rom_route, cubic_bezier_route, count_direction_changes, densify_route, estimated_route_seconds, generate_lawnmower_route,
     optimal_direction_deg, plan_missions, polygon_area_m2, route_length_m, shortest_route_direction_deg,
 )
 
@@ -684,6 +789,11 @@ class MainWindow(QMainWindow):
     geozone_check_finished = Signal(int, object)
     context_geozone_check_finished = Signal(object)
     local_rules_check_finished = Signal(object)
+    geozone_update_check_finished = Signal(object)
+    geozone_download_progress = Signal(int, int, str)
+    geozone_download_finished = Signal(int, int, bool)
+    geozone_vector_progress = Signal(int, int, str)
+    geozone_vector_finished = Signal(bool, str)
 
     def __init__(self):
         super().__init__()
@@ -728,13 +838,31 @@ class MainWindow(QMainWindow):
         self.geozone_check_finished.connect(self._show_geozone_check_result)
         self.context_geozone_check_finished.connect(self._show_context_geozone_result)
         self.local_rules_check_finished.connect(self._show_local_rules_result)
+        self.geozone_update_check_finished.connect(self._finish_geozone_update_check)
+        self.geozone_download_progress.connect(self._update_geozone_download_progress)
+        self.geozone_download_finished.connect(self._finish_geozone_download)
+        self.geozone_vector_progress.connect(self._update_geozone_vector_progress)
+        self.geozone_vector_finished.connect(self._finish_geozone_vector_download)
         self.settings = QSettings("ACMP", "Mission Planner")
+        # This is deliberately inside the ACMP workspace, not a browser-only
+        # cache, so saved tiles remain available without internet access.
+        self.geozone_cache_dir = Path(__file__).resolve().parents[2] / "geozone-cache"
+        self.geozone_vector_db = self.geozone_cache_dir / "offline-geozones.sqlite"
+        self.geozone_cache_dir.mkdir(parents=True, exist_ok=True)
+        self._geozone_tile_server = _GeozoneTileCacheServer(self.geozone_cache_dir)
+        self._geozone_tile_server.offline_mode = self._setting_bool("geozone_offline_mode")
+        threading.Thread(target=self._geozone_tile_server.serve_forever, name="acmp-geozone-tile-cache", daemon=True).start()
+        self._geozone_download_cancel = threading.Event()
+        self._geozone_vector_download_cancel = threading.Event()
+        self._geozone_download_dialog = None
         self.ui_language = self.settings.value("ui_language", "de")
         self.geozone_zone_method = self.settings.value("geozone_zone_method", "global")
         self._rc_uploaded_missions = self._load_rc_uploaded_missions()
         self.setWindowTitle("ACMP – Aerial Capture Mission Planner")
         self.resize(1500, 900)
         self._build_ui()
+        self._apply_flight_path_approximation()
+        QTimer.singleShot(1200, self._check_geozone_updates_at_start)
 
     def _build_ui(self):
         menu_bar = self.menuBar()
@@ -767,9 +895,20 @@ class MainWindow(QMainWindow):
         self.settings_action = QAction("Einstellungen", self)
         self.settings_action.triggered.connect(self.open_settings_dialog)
         menu_bar.addAction(self.settings_action)
+        geozone_update = QAction("Geo-Zonen-Einstellungen …", self)
+        geozone_update.triggered.connect(self.open_geozone_update_dialog)
+        menu_bar.addAction(geozone_update)
         about = QAction("Info", self)
         about.triggered.connect(self._show_about)
         menu_bar.addAction(about)
+        self.geozone_background_label = QLabel("Hintergrundaktualisierung Geo-Zonen")
+        self.geozone_background_progress = QProgressBar()
+        self.geozone_background_progress.setFixedWidth(155)
+        self.geozone_background_progress.setRange(0, 0)
+        self.statusBar().addPermanentWidget(self.geozone_background_label)
+        self.statusBar().addPermanentWidget(self.geozone_background_progress)
+        self.geozone_background_label.hide()
+        self.geozone_background_progress.hide()
 
         self.page = MapPage(self)
         self.page.polygon_changed.connect(self._polygon_changed)
@@ -786,7 +925,10 @@ class MainWindow(QMainWindow):
         self.map_view = MapView()
         self.map_view.setPage(self.page)
         self.map_view.loadFinished.connect(self._map_loaded)
-        self.map_view.setHtml(MAP_HTML, QUrl("https://acmp.local/"))
+        # The map's local cache proxy intentionally uses loopback HTTP.  Give
+        # the in-memory document a localhost origin as well, avoiding browser
+        # mixed-content warnings while retaining HTTPS for all remote sources.
+        self.map_view.setHtml(MAP_HTML, QUrl("http://localhost/"))
 
         sidebar = self._build_sidebar()
         splitter = QSplitter()
@@ -849,6 +991,470 @@ class MainWindow(QMainWindow):
     def _save_global_setting(self, key: str, value):
         self.settings.setValue(key, value)
         self.settings.sync()
+
+    def _flight_path_smoother(self):
+        return cubic_bezier_route if str(self.settings.value("flight_path_approximation", "catmull_rom")) == "cubic_bezier" else centripetal_catmull_rom_route
+
+    def _apply_flight_path_approximation(self):
+        name = "Bézier dritten Grades" if str(self.settings.value("flight_path_approximation", "catmull_rom")) == "cubic_bezier" else "Catmull–Rom"
+        if hasattr(self, "poi_flight_path_preview"):
+            self.poi_flight_path_preview.setText(f"Glatte POI-Flugbahn anzeigen ({name})")
+            self.poi_flight_path_preview.setToolTip(f"Karten-Vorschau der erwarteten glatten DJI-Bahn ({name}). Die nummerierten Punkte bleiben die erzeugten und exportierten Steuerpunkte.")
+            self._show_poi_plan()
+        self._refresh_mission_display()
+
+    def _check_geozone_updates_at_start(self):
+        if not (self._setting_bool("geozone_check_updates_at_start") or self._setting_bool("geozone_refresh_at_start")):
+            return
+        self._start_geozone_update_check(manual=False)
+
+    def _start_geozone_update_check(self, manual: bool):
+        if not manual:
+            self.geozone_background_label.show()
+            self.geozone_background_progress.show()
+        threading.Thread(target=self._fetch_geozone_update_marker, args=(manual,), name="acmp-geozone-manual-check" if manual else "acmp-geozone-update", daemon=True).start()
+
+    def _fetch_geozone_update_marker(self, manual: bool = False):
+        try:
+            # Both services are relevant: WMS supplies the visible PNG
+            # overlay, WFS supplies geometries for inspection and conflict
+            # checks.  Combining their capability documents creates one
+            # source-version marker for a complete Geo-Zones update.
+            documents = []
+            for url in (
+                "https://uas-betrieb.de/geoservices/dipul/wms?service=WMS&request=GetCapabilities",
+                "https://uas-betrieb.de/geoservices/dipul/wfs?service=WFS&request=GetCapabilities",
+            ):
+                with urlopen(Request(url, headers={"User-Agent": "ACMP/1.0"}), timeout=15) as response:
+                    documents.append(response.read())
+            marker = hashlib.sha256(b"\0".join(documents)).hexdigest()
+            self.geozone_update_check_finished.emit({"marker": marker, "services": "WMS + WFS", "manual": manual})
+        except Exception as error:
+            self.geozone_update_check_finished.emit({"error": str(error), "manual": manual})
+
+    def _offline_geozone_vectors_current(self, marker: str) -> bool:
+        if not self.geozone_vector_db.is_file():
+            return False
+        try:
+            with sqlite3.connect(self.geozone_vector_db) as connection:
+                row = connection.execute("SELECT value FROM metadata WHERE key='source_marker'").fetchone()
+            return bool(row and row[0] == marker)
+        except sqlite3.Error:
+            return False
+
+    def _clear_geozone_cache(self, marker):
+        # A harmless version parameter creates new URLs for this WMS layer
+        # only; base-map tiles remain cached and old geozone tiles are evicted
+        # later by Chromium's normal cache policy.
+        if self._map_ready:
+            self.js(f"setGeozoneVersion({json.dumps(marker)})")
+
+    def _finish_geozone_update_check(self, outcome):
+        automatic = self._setting_bool("geozone_refresh_at_start")
+        manual_check = bool(outcome.get("manual")) if isinstance(outcome, dict) else False
+        if not manual_check:
+            self.geozone_background_label.hide()
+            self.geozone_background_progress.hide()
+        marker = outcome.get("marker") if isinstance(outcome, dict) else None
+        previous = str(self.settings.value("geozone_update_marker", ""))
+        if not marker:
+            if automatic:
+                self._clear_geozone_cache(str(time.time()))
+                self.statusBar().showMessage("Geo-Zonen-Cache aktualisiert (Quelle ohne Versionskennung nicht erreichbar).", 6000)
+            if manual_check:
+                self._geozone_download_widgets[1].setText("Update-Prüfung fehlgeschlagen. Die vorhandenen Offline-Kacheln bleiben unverändert.")
+                QMessageBox.warning(self, "Geo-Zonen-Prüfung", "Die Update-Prüfung konnte nicht durchgeführt werden. Die vorhandenen Daten bleiben unverändert.")
+            return
+        if not previous:
+            self.settings.setValue("geozone_update_marker", marker); self.settings.sync()
+            self._clear_geozone_cache(marker)
+            if manual_check:
+                self._geozone_download_widgets[1].setText("Offizielle Versionskennung gespeichert. Du kannst den Deutschland-Download starten.")
+                QMessageBox.information(self, "Geo-Zonen-Prüfung", "Die offizielle Geo-Zonen-Version wurde gespeichert. Deine Daten sind auf dem aktuellen Stand.")
+            return
+        if marker == previous:
+            if manual_check:
+                vector_state = "Offline-Abfragen sind aktuell." if self._offline_geozone_vectors_current(marker) else "Offline-Abfragen fehlen oder müssen aktualisiert werden."
+                self._geozone_download_widgets[1].setText(f"Kein Overlay-Update verfügbar. {vector_state}")
+                QMessageBox.information(self, "Geo-Zonen-Prüfung", f"Kein Update verfügbar. Die Overlay-Daten sind aktuell.\n\n{vector_state}")
+            return
+        if automatic:
+            self._clear_geozone_cache(marker)
+            self.settings.setValue("geozone_update_marker", marker); self.settings.sync()
+            self.statusBar().showMessage("Geo-Zonen-Update geladen; der Karten-Cache wird neu aufgebaut.", 6000)
+        elif manual_check:
+            answer = QMessageBox.question(self, "Geo-Zonen-Update verfügbar", "Die offizielle Quelle für Karten-Overlay und Offline-Abfragen wurde geändert. Overlay jetzt aktualisieren?\n\nDie Offline-Abfragen können danach im Bereich ‚Offline-Abfragen‘ erneut heruntergeladen werden.")
+            if answer == QMessageBox.StandardButton.Yes:
+                self._clear_geozone_cache(marker)
+                self.settings.setValue("geozone_update_marker", marker); self.settings.sync()
+        else:
+            self.statusBar().showMessage("Geo-Zonen-Update verfügbar. Öffne die Geo-Zonen-Einstellungen zum Aktualisieren.", 7000)
+
+    @staticmethod
+    def _germany_tile_coordinates(max_zoom: int):
+        """Yield Web-Mercator tiles covering Germany, including a small border."""
+        west, south, east, north = 5.5, 47.0, 15.5, 55.2
+        for zoom in range(5, max_zoom + 1):
+            count = 2 ** zoom
+            left, right = int((west + 180) / 360 * count), int((east + 180) / 360 * count)
+            top = int((1 - math.asinh(math.tan(math.radians(north))) / math.pi) / 2 * count)
+            bottom = int((1 - math.asinh(math.tan(math.radians(south))) / math.pi) / 2 * count)
+            for x in range(left, right + 1):
+                for y in range(top, bottom + 1):
+                    yield zoom, x, y
+
+    @staticmethod
+    def _geozone_wms_tile_url(zoom: int, x: int, y: int) -> str:
+        extent = 20_037_508.342789244
+        span = 2 * extent / (2 ** zoom)
+        min_x = -extent + x * span
+        max_x = min_x + span
+        max_y = extent - y * span
+        min_y = max_y - span
+        return GEOZONE_WMS_PREFIX + urlencode({
+            "service": "WMS", "request": "GetMap", "layers": GEOZONE_LAYERS,
+            "styles": "", "format": "image/png", "transparent": "true", "version": "1.3.0",
+            "width": 256, "height": 256, "crs": "EPSG:3857",
+            "bbox": f"{min_x},{min_y},{max_x},{max_y}",
+        })
+
+    def open_geozone_update_dialog(self):
+        if self._geozone_download_dialog and self._geozone_download_dialog.isVisible():
+            self._geozone_download_dialog.raise_()
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Geo-Zonen-Einstellungen")
+        dialog.setMinimumWidth(480)
+        layout = QVBoxLayout(dialog)
+        description = QLabel(f"Lokaler Speicherort: <code>{escape(str(self.geozone_cache_dir))}</code>")
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        updates_group = QGroupBox("Aktualisierung", dialog)
+        updates_form = QFormLayout(updates_group)
+        check_updates = QCheckBox("Beim Start nach Geo-Zonen-Updates suchen", updates_group)
+        check_updates.setChecked(self._setting_bool("geozone_check_updates_at_start"))
+        check_updates.toggled.connect(lambda value: self._save_global_setting("geozone_check_updates_at_start", value))
+        refresh_updates = QCheckBox("Geo-Zonen bei verfügbarem Update automatisch aktualisieren", updates_group)
+        refresh_updates.setChecked(self._setting_bool("geozone_refresh_at_start"))
+        refresh_updates.toggled.connect(lambda value: self._save_global_setting("geozone_refresh_at_start", value))
+        check = QPushButton("Jetzt auf Update prüfen", updates_group)
+        check.clicked.connect(lambda: self._start_geozone_update_check(manual=True))
+        updates_form.addRow(check_updates); updates_form.addRow(refresh_updates); updates_form.addRow(check)
+        layout.addWidget(updates_group)
+
+        overlay_group = QGroupBox("Karten-Overlay (PNG-Kacheln)", dialog)
+        overlay_layout = QVBoxLayout(overlay_group)
+        overlay_note = QLabel("Im Online-Modus wird jede auf der Karte angezeigte Geo-Zonen-Kachel automatisch gespeichert. Der Download unten lädt ganz Deutschland vor.")
+        overlay_note.setWordWrap(True); overlay_layout.addWidget(overlay_note)
+        form = QFormLayout()
+        detail = QComboBox(dialog)
+        for zoom, caption in ((10, "Zoom 10 – Übersicht (ca. 1.600 Kacheln)"), (11, "Zoom 11 – regional (ca. 6.000 Kacheln)"), (12, "Zoom 12 – detailliert (ca. 23.000 Kacheln)"), (13, "Zoom 13 – sehr detailliert (ca. 91.000 Kacheln)")):
+            detail.addItem(caption, zoom)
+        detail.setCurrentIndex(2)
+        form.addRow("Offline-Detailgrad:", detail)
+        overlay_layout.addLayout(form)
+        cache_info = QLabel(); cache_info.setWordWrap(True); overlay_layout.addWidget(cache_info)
+        overlay_controls = QHBoxLayout()
+        start = QPushButton("Deutschland als Kartenkacheln herunterladen", overlay_group)
+        clear_cache = QPushButton("Kartenkacheln löschen", overlay_group)
+        overlay_controls.addWidget(start); overlay_controls.addWidget(clear_cache); overlay_controls.addStretch(1)
+        overlay_layout.addLayout(overlay_controls)
+        layout.addWidget(overlay_group)
+
+        offline_group = QGroupBox("Offline-Abfragen (‚Was ist hier?‘ und Konfliktprüfung)", dialog)
+        offline_layout = QVBoxLayout(offline_group)
+        offline_note = QLabel("Hier werden die offiziellen Geometrien und Metadaten als lokale Datenbank gespeichert. Nur damit funktionieren Abfragen ohne Internet vollständig.")
+        offline_note.setWordWrap(True); offline_layout.addWidget(offline_note)
+        offline_mode = QCheckBox("Offline-Modus verwenden (keine Geo-Zonen-Netzabfragen)", offline_group)
+        offline_mode.setChecked(self._setting_bool("geozone_offline_mode"))
+        offline_mode.setToolTip("Benötigt den Download der Offline-Abfragen, damit ‚Was ist hier?‘ und Konfliktprüfungen vollständig funktionieren.")
+        offline_mode.toggled.connect(self._set_geozone_offline_mode)
+        offline_layout.addWidget(offline_mode)
+        vector_info = QLabel(); vector_info.setWordWrap(True); offline_layout.addWidget(vector_info)
+        offline_controls = QHBoxLayout()
+        vector_start = QPushButton("Offline-Abfragen herunterladen", offline_group)
+        clear_vectors = QPushButton("Offline-Abfragen löschen", offline_group)
+        offline_controls.addWidget(vector_start); offline_controls.addWidget(clear_vectors); offline_controls.addStretch(1)
+        offline_layout.addLayout(offline_controls)
+        layout.addWidget(offline_group)
+
+        status = QLabel("Bereit. Für vollständige Offline-Abfragen müssen zusätzlich die offiziellen Vektordaten heruntergeladen werden.")
+        status.setWordWrap(True)
+        layout.addWidget(status)
+        progress = QProgressBar(dialog)
+        progress.setRange(0, 1)
+        layout.addWidget(progress)
+        controls = QHBoxLayout()
+        stop = QPushButton("Stoppen")
+        stop.setEnabled(False)
+        controls.addStretch(1); controls.addWidget(stop)
+        layout.addLayout(controls)
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dialog)
+        close.rejected.connect(dialog.reject); close.accepted.connect(dialog.accept)
+        layout.addWidget(close)
+        self._geozone_download_dialog = dialog
+        self._geozone_download_widgets = (detail, status, progress, start, stop, check, vector_start, offline_mode, cache_info, clear_cache, check_updates, refresh_updates, vector_info, clear_vectors)
+        start.clicked.connect(self._start_geozone_download)
+        vector_start.clicked.connect(self._start_geozone_vector_download)
+        clear_cache.clicked.connect(self._clear_geozone_tile_cache)
+        clear_vectors.clicked.connect(self._clear_geozone_vector_cache)
+        stop.clicked.connect(lambda: (self._geozone_download_cancel.set(), self._geozone_vector_download_cancel.set()))
+        dialog.finished.connect(lambda _result: setattr(self, "_geozone_download_dialog", None))
+        self._refresh_geozone_cache_info()
+        self._refresh_geozone_vector_info()
+        dialog.show()
+
+    def _geozone_tile_cache_size(self) -> tuple[int, int]:
+        files = [path for path in self.geozone_cache_dir.rglob("*.png") if path.is_file()]
+        return len(files), sum(path.stat().st_size for path in files)
+
+    def _refresh_geozone_cache_info(self):
+        if not self._geozone_download_dialog:
+            return
+        files, size = self._geozone_tile_cache_size()
+        self._geozone_download_widgets[8].setText(
+            f"Karten-Cache: {files:,} PNG-Kacheln · {size / 1024 / 1024:.1f} MB. "
+            "Die Offline-Abfrage-Datenbank wird hiervon nicht gelöscht."
+        )
+
+    def _refresh_geozone_vector_info(self):
+        if not self._geozone_download_dialog:
+            return
+        if self.geozone_vector_db.is_file():
+            size = self.geozone_vector_db.stat().st_size / 1024 / 1024
+            marker = str(self.settings.value("geozone_update_marker", ""))
+            state = "aktuell" if marker and self._offline_geozone_vectors_current(marker) else "Update verfügbar"
+            text = f"Offline-Abfragen: vorhanden · {size:.1f} MB · {state}."
+        else:
+            text = "Offline-Abfragen: noch nicht heruntergeladen."
+        self._geozone_download_widgets[12].setText(text)
+
+    def _clear_geozone_vector_cache(self):
+        if not self.geozone_vector_db.is_file():
+            self._refresh_geozone_vector_info()
+            return
+        size = self.geozone_vector_db.stat().st_size / 1024 / 1024
+        if QMessageBox.question(
+            self, "Offline-Abfragen löschen",
+            f"Die lokale Geo-Zonen-Abfragedatenbank ({size:.1f} MB) löschen?\n\n"
+            "‚Was ist hier?‘ und Konfliktprüfungen funktionieren dann im Offline-Modus nicht mehr.",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self.geozone_vector_db.unlink()
+        self._set_geozone_offline_mode(False)
+        self._geozone_download_widgets[7].setChecked(False)
+        self._refresh_geozone_vector_info()
+
+    def _clear_geozone_tile_cache(self):
+        files, size = self._geozone_tile_cache_size()
+        if not files:
+            self._refresh_geozone_cache_info()
+            return
+        if QMessageBox.question(
+            self, "Karten-Cache löschen",
+            f"{files:,} Geo-Zonen-Kacheln ({size / 1024 / 1024:.1f} MB) löschen?\n\n"
+            "Die Offline-Abfragen bleiben erhalten.",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        for child in self.geozone_cache_dir.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+        self._refresh_geozone_cache_info()
+        if self._map_ready:
+            self.js("setGeozoneVersion('cache-cleared-' + Date.now())")
+
+    def _set_geozone_offline_mode(self, enabled: bool):
+        self._geozone_tile_server.offline_mode = bool(enabled)
+        self.settings.setValue("geozone_offline_mode", bool(enabled))
+        self.settings.sync()
+        self.statusBar().showMessage(
+            "Geo-Zonen-Offline-Modus aktiv." if enabled else "Geo-Zonen-Online-Modus aktiv.", 4000
+        )
+
+    def _start_geozone_download(self):
+        detail, status, progress, start, stop, check, _vector_start, _offline_mode, *_rest = self._geozone_download_widgets
+        max_zoom = int(detail.currentData())
+        tiles = list(self._germany_tile_coordinates(max_zoom))
+        if max_zoom >= 13 and QMessageBox.question(self, "Großer Download", f"{len(tiles):,} Kacheln werden geladen. Fortfahren?") != QMessageBox.StandardButton.Yes:
+            return
+        self._geozone_download_cancel.clear()
+        detail.setEnabled(False); start.setEnabled(False); check.setEnabled(False); stop.setEnabled(True)
+        progress.setRange(0, len(tiles)); progress.setValue(0)
+        status.setText("Geo-Zonen werden heruntergeladen …")
+        version = str(self.settings.value("geozone_update_marker", "initial"))
+        threading.Thread(target=self._download_geozone_tiles, args=(tiles, version), name="acmp-geozone-download", daemon=True).start()
+
+    def _download_geozone_tiles(self, tiles, version: str):
+        version_dir = self.geozone_cache_dir / hashlib.sha256(version.encode()).hexdigest()[:16]
+        completed = downloaded = 0
+        last_update = 0.0
+        def fetch(tile):
+            zoom, x, y = tile
+            if self._geozone_download_cancel.is_set():
+                return "cancelled"
+            destination = version_dir / f"{zoom}_{x}_{y}.png"
+            if destination.is_file():
+                return "cached"
+            try:
+                with urlopen(Request(self._geozone_wms_tile_url(zoom, x, y), headers={"User-Agent": "ACMP/1.0"}), timeout=20) as response:
+                    data = response.read()
+                if data.startswith(b"\x89PNG"):
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(data)
+                    return "downloaded"
+            except Exception:
+                pass
+            return "failed"
+
+        # Ramp up automatically while the public WMS is healthy.  A failure
+        # immediately backs off, avoiding a fixed arbitrary bottleneck while
+        # still preventing an uncontrolled request flood.
+        pending = set()
+        tile_iterator = iter(tiles)
+        target_parallelism, maximum_parallelism = 8, 64
+        stable_ceiling = maximum_parallelism
+        last_stable_parallelism = target_parallelism
+        backoff_applied = False
+        healthy_completions = 0
+        with ThreadPoolExecutor(max_workers=maximum_parallelism) as executor:
+            for _ in range(target_parallelism):
+                try:
+                    pending.add(executor.submit(fetch, next(tile_iterator)))
+                except StopIteration:
+                    break
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    completed += 1
+                    try:
+                        result = future.result()
+                        downloaded += int(result == "downloaded")
+                        if result == "failed":
+                            # Several requests from the too-high level can
+                            # fail together.  Back off only once; otherwise
+                            # those already in flight would incorrectly push
+                            # a stable 32 down to 4, 2, and so on.
+                            if not backoff_applied:
+                                stable_ceiling = max(4, last_stable_parallelism)
+                                target_parallelism = stable_ceiling
+                                backoff_applied = True
+                                healthy_completions = 0
+                        elif result != "cancelled":
+                            healthy_completions += 1
+                            if healthy_completions >= max(20, target_parallelism * 3) and target_parallelism < stable_ceiling:
+                                last_stable_parallelism = target_parallelism
+                                target_parallelism = min(stable_ceiling, target_parallelism + 2)
+                                healthy_completions = 0
+                    except Exception:
+                        if not backoff_applied:
+                            stable_ceiling = max(4, last_stable_parallelism)
+                            target_parallelism = stable_ceiling
+                            backoff_applied = True
+                            healthy_completions = 0
+                    while not self._geozone_download_cancel.is_set() and len(pending) < target_parallelism:
+                        try:
+                            pending.add(executor.submit(fetch, next(tile_iterator)))
+                        except StopIteration:
+                            break
+                    if time.monotonic() - last_update >= 0.2 or completed == len(tiles):
+                        mode = "stabil" if backoff_applied else "automatisch"
+                        self.geozone_download_progress.emit(completed, len(tiles), f"{downloaded:,} neue Kacheln gespeichert · {target_parallelism} parallel ({mode})")
+                        last_update = time.monotonic()
+        self.geozone_download_finished.emit(completed, downloaded, self._geozone_download_cancel.is_set())
+
+    def _update_geozone_download_progress(self, completed, total, text):
+        if not self._geozone_download_dialog:
+            return
+        _detail, status, progress, _start, _stop, _check, _vector_start, _offline_mode, *_rest = self._geozone_download_widgets
+        progress.setValue(completed)
+        status.setText(f"{completed:,} / {total:,} Kacheln · {text}")
+
+    def _finish_geozone_download(self, completed, downloaded, cancelled):
+        if not self._geozone_download_dialog:
+            return
+        detail, status, progress, start, stop, check, _vector_start, _offline_mode, *_rest = self._geozone_download_widgets
+        detail.setEnabled(True); start.setEnabled(True); check.setEnabled(True); stop.setEnabled(False)
+        status.setText(("Download gestoppt" if cancelled else "Download abgeschlossen") + f": {completed:,} geprüft, {downloaded:,} neu gespeichert.")
+        self._refresh_geozone_cache_info()
+
+    def _start_geozone_vector_download(self):
+        if QMessageBox.question(
+            self, "Offline-Abfragen herunterladen",
+            "Die vollständigen offiziellen Geo-Zonen-Geometrien werden lokal gespeichert. "
+            "Das kann mehrere hundert MB bis über 1 GB belegen und längere Zeit dauern. Fortfahren?",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        detail, status, progress, start, stop, check, vector_start, offline_mode, *_rest = self._geozone_download_widgets
+        self._geozone_vector_download_cancel.clear()
+        detail.setEnabled(False); start.setEnabled(False); check.setEnabled(False); vector_start.setEnabled(False); offline_mode.setEnabled(False); stop.setEnabled(True)
+        progress.setRange(0, len(GEOZONE_LABELS)); progress.setValue(0)
+        status.setText("Offizielle Vektordaten werden vorbereitet …")
+        threading.Thread(target=self._download_geozone_vectors, name="acmp-geozone-vectors", daemon=True).start()
+
+    def _download_geozone_vectors(self):
+        temporary = self.geozone_vector_db.with_suffix(".sqlite.part")
+        try:
+            if temporary.exists():
+                temporary.unlink()
+            connection = sqlite3.connect(temporary)
+            connection.executescript("""
+                PRAGMA journal_mode=OFF;
+                PRAGMA synchronous=OFF;
+                CREATE TABLE features (id INTEGER PRIMARY KEY, layer TEXT NOT NULL, feature_json TEXT NOT NULL);
+                CREATE VIRTUAL TABLE feature_index USING rtree(id, min_lon, max_lon, min_lat, max_lat);
+                CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            """)
+            feature_id = 0
+            for layer_number, layer in enumerate(GEOZONE_LABELS, 1):
+                if self._geozone_vector_download_cancel.is_set():
+                    connection.close(); temporary.unlink(missing_ok=True)
+                    self.geozone_vector_finished.emit(False, "Download gestoppt; vorhandene Offline-Daten bleiben erhalten.")
+                    return
+                self.geozone_vector_progress.emit(layer_number - 1, len(GEOZONE_LABELS), f"Lade {GEOZONE_LABELS[layer]} …")
+                params = {"SERVICE": "WFS", "VERSION": "2.0.0", "REQUEST": "GetFeature", "typeNames": f"dipul:{layer}", "outputFormat": "application/json", "count": 1000000}
+                with urlopen(f"https://uas-betrieb.de/geoservices/dipul/wfs?{urlencode(params)}", timeout=180) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                rows = []
+                index_rows = []
+                for feature in payload.get("features", []):
+                    geometry = shape(feature.get("geometry"))
+                    if geometry.is_empty:
+                        continue
+                    min_lon, min_lat, max_lon, max_lat = geometry.bounds
+                    feature.setdefault("properties", {})["_acmp_label"] = GEOZONE_LABELS[layer]
+                    feature_id += 1
+                    rows.append((feature_id, layer, json.dumps(feature, ensure_ascii=False, separators=(",", ":"))))
+                    index_rows.append((feature_id, min_lon, max_lon, min_lat, max_lat))
+                connection.executemany("INSERT INTO features VALUES (?, ?, ?)", rows)
+                connection.executemany("INSERT INTO feature_index VALUES (?, ?, ?, ?, ?)", index_rows)
+                connection.commit()
+                self.geozone_vector_progress.emit(layer_number, len(GEOZONE_LABELS), f"{GEOZONE_LABELS[layer]}: {len(rows):,} Zonen gespeichert")
+            connection.execute("INSERT INTO metadata VALUES ('complete', 'true')")
+            connection.execute("INSERT INTO metadata VALUES ('source_marker', ?)", (str(self.settings.value("geozone_update_marker", "initial")),))
+            connection.commit(); connection.close()
+            temporary.replace(self.geozone_vector_db)
+            self.geozone_vector_finished.emit(True, "Offline-Abfragen vollständig gespeichert.")
+        except Exception as error:
+            try:
+                connection.close()
+            except Exception:
+                pass
+            temporary.unlink(missing_ok=True)
+            self.geozone_vector_finished.emit(False, f"Offline-Abfragen fehlgeschlagen: {error}")
+
+    def _update_geozone_vector_progress(self, completed, total, text):
+        if self._geozone_download_dialog:
+            _detail, status, progress, *_rest = self._geozone_download_widgets
+            progress.setValue(completed); status.setText(f"Ebene {completed}/{total} · {text}")
+
+    def _finish_geozone_vector_download(self, success, text):
+        if not self._geozone_download_dialog:
+            return
+        detail, status, _progress, start, stop, check, vector_start, offline_mode, *_rest = self._geozone_download_widgets
+        detail.setEnabled(True); start.setEnabled(True); check.setEnabled(True); vector_start.setEnabled(True); offline_mode.setEnabled(True); stop.setEnabled(False)
+        status.setText(text)
+        self._refresh_geozone_vector_info()
 
     def _apply_interface_mode(self):
         """Keep experimental export tools out of the default, simple UI."""
@@ -1242,6 +1848,10 @@ class MainWindow(QMainWindow):
             "Stützpunkte darf näher an der Sperrzone entlangführen."
         )
         self.poi_support_spacing = self._number(2, 0.5, 100, 0.5, " m")
+        self.poi_level_transition_mode = QComboBox()
+        self.poi_level_transition_mode.addItems(["Standard", "Stützpunkte"])
+        self.poi_level_transition_support_spacing = self._number(2, 0.5, 100, 0.5, " m")
+        self.poi_level_transition_mode.currentTextChanged.connect(self._poi_level_transition_mode_changed)
         self.poi_avoidance_mode.currentTextChanged.connect(self._poi_avoidance_mode_changed)
         self.poi_flight_path_preview = QCheckBox("Glatte POI-Flugbahn anzeigen (Catmull–Rom)")
         self.poi_flight_path_preview.setChecked(True)
@@ -1300,6 +1910,8 @@ class MainWindow(QMainWindow):
         poi_settings_form.addRow("Bahnform:", self.poi_orbit_geometry)
         poi_settings_form.addRow("POI-Umfahrungsmodus:", self.poi_avoidance_mode)
         poi_settings_form.addRow("Stützpunkt-Abstand an Sperrzonen-Ecken:", self.poi_support_spacing)
+        poi_settings_form.addRow("Ebenenwechselmodus:", self.poi_level_transition_mode)
+        poi_settings_form.addRow("Stützpunkt-Abstand beim Ebenenwechsel:", self.poi_level_transition_support_spacing)
         poi_settings_form.addRow(self.poi_flight_path_preview)
         poi_settings_form.addRow("Fassadenrichtung:", self.poi_facade_bearing)
         poi_settings_form.addRow("Umlaufrichtung:", self.poi_orbit_direction)
@@ -1380,7 +1992,8 @@ class MainWindow(QMainWindow):
         limit_form.addRow("Bei Sperrgebieten:", self.no_fly_mode)
         for field in (
             self.direction_mode, self.route_mode, self.waypoint_action, self.poi_capture_type,
-            self.poi_orbit_geometry, self.poi_orbit_direction, self.poi_waypoint_action, self.poi_avoidance_mode, self.split_mode, self.finish_action,
+            self.poi_orbit_geometry, self.poi_orbit_direction, self.poi_waypoint_action, self.poi_avoidance_mode,
+            self.poi_level_transition_mode, self.split_mode, self.finish_action,
             self.signal_loss_action, self.outside_area_mode, self.no_fly_mode,
         ):
             field.setFixedWidth(168)
@@ -1529,6 +2142,7 @@ class MainWindow(QMainWindow):
 
         self._poi_capture_type_changed(self.poi_capture_type.currentText())
         self._poi_avoidance_mode_changed(self.poi_avoidance_mode.currentText())
+        self._poi_level_transition_mode_changed(self.poi_level_transition_mode.currentText())
         self._restore_last_flight_settings()
         self._connect_flight_settings_autosave()
         self._update_photogrammetry_geometry()
@@ -1543,6 +2157,7 @@ class MainWindow(QMainWindow):
         self._right_align_form_fields(poi_settings_form, (
             self.poi_capture_type, self.poi_orbit_geometry, self.poi_facade_bearing, self.poi_orbit_direction,
             self.poi_avoidance_mode, self.poi_support_spacing,
+            self.poi_level_transition_mode, self.poi_level_transition_support_spacing,
             poi_detail_widget, self.poi_object_height, self.poi_distance, self.poi_min_altitude,
             self.poi_max_altitude, self.poi_vertical_overlap, self.poi_along_overlap,
             self.poi_speed, self.poi_minimum_interval_duration, self.poi_waypoint_action,
@@ -1889,6 +2504,8 @@ class MainWindow(QMainWindow):
             "poi_capture_type": self.poi_capture_type.currentText(), "poi_orbit_geometry": self.poi_orbit_geometry.currentText(),
             "poi_avoidance_mode": self.poi_avoidance_mode.currentText(),
             "poi_support_spacing": self.poi_support_spacing.value(),
+            "poi_level_transition_mode": self.poi_level_transition_mode.currentText(),
+            "poi_level_transition_support_spacing": self.poi_level_transition_support_spacing.value(),
             "poi_facade_bearing": self.poi_facade_bearing.value(), "poi_orbit_direction": self.poi_orbit_direction.currentText(),
             "poi_object_height": self.poi_object_height.value(),
             "poi_distance": self.poi_distance.value(), "poi_min_altitude": self.poi_min_altitude.value(),
@@ -1966,6 +2583,11 @@ class MainWindow(QMainWindow):
         saved_interface_mode = str(self.settings.value("interface_mode", "simple"))
         interface_mode.setCurrentIndex(1 if saved_interface_mode == "advanced" else 0)
         general_form.addRow("Bedienmodus" if not english else "Interface mode", interface_mode)
+        approximation = QComboBox(general)
+        approximation.addItem("Centripetal Catmull–Rom", "catmull_rom")
+        approximation.addItem("Bézier-Kurve dritten Grades", "cubic_bezier")
+        approximation.setCurrentIndex(1 if str(self.settings.value("flight_path_approximation", "catmull_rom")) == "cubic_bezier" else 0)
+        general_form.addRow("Approximation der Flugbahn" if not english else "Flight-path approximation", approximation)
         drone_category = QComboBox(general)
         drone_category.addItem(
             "Consumer (e.g. DJI Mini 5 Pro, Lito)" if english else
@@ -2087,9 +2709,11 @@ class MainWindow(QMainWindow):
         self.settings.setValue("geozone_opacity", opacity.value())
         self.settings.setValue("local_rules_opacity", local_opacity.value())
         self.settings.setValue("geozone_zone_method", zone_method.currentData())
+        self.settings.setValue("flight_path_approximation", approximation.currentData())
         self.settings.setValue("ui_language", language.currentData())
         self.settings.sync()
         self.geozone_zone_method = zone_method.currentData()
+        self._apply_flight_path_approximation()
         self._apply_interface_mode()
         self._configure_route_modes()
         self._update_photogrammetry_geometry()
@@ -2130,8 +2754,10 @@ class MainWindow(QMainWindow):
         self._apply_saved_map_opacities()
         self.js(f"setMapLanguage({json.dumps(self.ui_language)})")
         self.js(f"setPoiLegendCollapsed({str(self._setting_bool('poi_legend_collapsed')).lower()})")
+        self.js(f"setGeozoneCacheProxy({json.dumps('http://127.0.0.1:' + str(self._geozone_tile_server.server_port))})")
         self.js("setBase('satellite')" if self._canonical(self.base_layer.currentText()) == "Satellit" else "setBase('normal')")
         self.js(f"setGeozones({str(self.geozones_toggle.isChecked()).lower()})")
+        self.js(f"setGeozoneVersion({json.dumps(str(self.settings.value('geozone_update_marker', 'initial')))})")
         self.js(f"setLocalRules({str(self.local_rules_toggle.isChecked()).lower()})")
 
     def _map_loaded(self, ok: bool):
@@ -2191,6 +2817,7 @@ class MainWindow(QMainWindow):
         # covered by static replacement above.
         if hasattr(self, "capture_plan_label"):
             self._update_photogrammetry_geometry()
+        self._apply_flight_path_approximation()
         if self._map_ready:
             self.js(f"setMapLanguage({json.dumps(self.ui_language)})")
             if self.generated_poi_plan is not None:
@@ -2244,6 +2871,7 @@ class MainWindow(QMainWindow):
             (self.poi_max_altitude, "poi_max_altitude"), (self.poi_vertical_overlap, "poi_vertical_overlap"),
             (self.poi_along_overlap, "poi_along_overlap"), (self.poi_speed, "poi_speed"),
             (self.poi_minimum_interval_duration, "poi_minimum_interval_duration"), (self.poi_support_spacing, "poi_support_spacing"),
+            (self.poi_level_transition_support_spacing, "poi_level_transition_support_spacing"),
         ]
         for field, key in number_fields:
             if key in values:
@@ -2255,6 +2883,7 @@ class MainWindow(QMainWindow):
             (self.no_fly_mode, "no_fly_mode"),
             (self.poi_capture_type, "poi_capture_type"), (self.poi_orbit_geometry, "poi_orbit_geometry"),
             (self.poi_avoidance_mode, "poi_avoidance_mode"),
+            (self.poi_level_transition_mode, "poi_level_transition_mode"),
             (self.poi_orbit_direction, "poi_orbit_direction"),
             (self.poi_waypoint_action, "poi_waypoint_action"),
         ]
@@ -2608,6 +3237,9 @@ class MainWindow(QMainWindow):
             self.poi_support_spacing, mode == "Stützpunkte für geradere Bahnen"
         )
 
+    def _poi_level_transition_mode_changed(self, mode: str):
+        self._set_poi_option_visible(self.poi_level_transition_support_spacing, mode == "Stützpunkte")
+
     def _poi_control_point_detail_changed(self, value: int):
         if hasattr(self, "poi_control_point_detail_label"):
             if value <= 25:
@@ -2672,6 +3304,7 @@ class MainWindow(QMainWindow):
             ],
             "objectHeight": self.poi_object_height.value(),
             "smooth": self.poi_flight_path_preview.isChecked(),
+            "approximation": str(self.settings.value("flight_path_approximation", "catmull_rom")),
             "missions": [
                 {"waypoints": [
                     {
@@ -2710,7 +3343,7 @@ class MainWindow(QMainWindow):
                 "durationText": f"{duration_s / 60:.1f}",
             })
         estimated_paths = (
-            [centripetal_catmull_rom_route(level["points"]) for level in levels]
+            [self._flight_path_smoother()(level["points"]) for level in levels]
             if self.poi_flight_path_preview.isChecked() else []
         )
         self.js(
@@ -2909,6 +3542,38 @@ class MainWindow(QMainWindow):
             if geometry.geom_type in {"MultiPolygon", "GeometryCollection"}:
                 return [part for item in geometry.geoms for part in polygon_parts(item)]
             return []
+
+        if self._setting_bool("geozone_offline_mode"):
+            if not self.geozone_vector_db.is_file():
+                return []
+            try:
+                with sqlite3.connect(self.geozone_vector_db) as connection:
+                    complete = connection.execute("SELECT value FROM metadata WHERE key='complete'").fetchone()
+                    if not complete or complete[0] != "true":
+                        return []
+                    rows = connection.execute(
+                        """SELECT feature_json FROM feature_index
+                           JOIN features USING (id)
+                           WHERE min_lon <= ? AND max_lon >= ? AND min_lat <= ? AND max_lat >= ?""",
+                        (max(longitudes), min(longitudes), max(latitudes), min(latitudes)),
+                    ).fetchall()
+                matching = []
+                for (raw_feature,) in rows:
+                    feature = json.loads(raw_feature)
+                    geometry = shape(feature.get("geometry"))
+                    if not geometry.intersects(flight_area):
+                        continue
+                    if self.geozone_zone_method == "fine":
+                        for part_index, part in enumerate(polygon_parts(geometry.intersection(flight_area)), start=1):
+                            clipped = json.loads(json.dumps(feature))
+                            clipped["id"] = f"{feature.get('id', 'zone')}:part-{part_index}"
+                            clipped["geometry"] = mapping(part)
+                            matching.append(clipped)
+                    else:
+                        matching.append(feature)
+                return matching
+            except (sqlite3.Error, OSError, ValueError, json.JSONDecodeError):
+                return []
 
         def load_layer(layer: str) -> list[dict]:
             params = {
@@ -3142,13 +3807,13 @@ class MainWindow(QMainWindow):
             self.max_waypoints, self.max_flight_minutes,
             self.poi_facade_bearing, self.poi_object_height, self.poi_distance, self.poi_min_altitude,
             self.poi_max_altitude, self.poi_vertical_overlap, self.poi_along_overlap, self.poi_speed,
-            self.poi_minimum_interval_duration, self.poi_support_spacing,
+            self.poi_minimum_interval_duration, self.poi_support_spacing, self.poi_level_transition_support_spacing,
         ]
         combo_fields = [
             self.direction_mode, self.route_mode, self.waypoint_action, self.split_mode,
             self.finish_action, self.signal_loss_action, self.outside_area_mode, self.no_fly_mode,
             self.poi_capture_type, self.poi_orbit_geometry, self.poi_orbit_direction, self.poi_waypoint_action,
-            self.poi_avoidance_mode,
+            self.poi_avoidance_mode, self.poi_level_transition_mode,
         ]
         for field in number_fields:
             field.valueChanged.connect(self._save_last_flight_settings)
@@ -3610,7 +4275,7 @@ class MainWindow(QMainWindow):
             minutes, remainder=divmod(round(seconds),60)
             labels.append(f"{label} · {len(mission)} WP · ≈ {minutes}:{remainder:02d} min")
         estimated_paths = (
-            [centripetal_catmull_rom_route(mission) for mission in missions]
+            [self._flight_path_smoother()(mission) for mission in missions]
             if self.flight_path_preview.isChecked() else []
         )
         self.js(
@@ -3722,6 +4387,9 @@ class MainWindow(QMainWindow):
                 orbit_geometry=self._canonical(self.poi_orbit_geometry.currentText()),
                 contour_boundary_clearance_m=(0.25 if self.poi_avoidance_mode.currentText() == "Stützpunkte für geradere Bahnen" else 2.0),
                 contour_support_spacing_m=(self.poi_support_spacing.value() if self.poi_avoidance_mode.currentText() == "Stützpunkte für geradere Bahnen" else None),
+                smoothing_approximation=str(self.settings.value("flight_path_approximation", "catmull_rom")),
+                level_transition_mode=self._canonical(self.poi_level_transition_mode.currentText()),
+                level_transition_support_spacing_m=self.poi_level_transition_support_spacing.value(),
                 top_down_roof_scan=self.poi_top_down_roof_scan.isChecked(),
                 top_down_overshoot_m=self.overshoot_distance.value(),
                 reduced_overshoot=self.poi_top_down_reduced_overshoot.isChecked(),
