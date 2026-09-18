@@ -13,7 +13,7 @@ from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
 from acmp.services.route_planner import (
-    add_overshoot_turns, centripetal_catmull_rom_route, generate_lawnmower_route,
+    add_overshoot_turns, centripetal_catmull_rom_route, cubic_bezier_route, generate_lawnmower_route,
     optimal_direction_deg,
 )
 
@@ -127,7 +127,7 @@ def _inside_allowed(line, allowed, blocked):
     return (allowed is None or allowed.covers(line)) and not any(line.intersects(zone) for zone in blocked)
 
 
-def _catmull_rom_local_line(coordinates):
+def _smoothed_local_line(coordinates, approximation="catmull_rom"):
     """Create the same centripetal Catmull-Rom approximation used by the map.
 
     The shared preview helper accepts latitude/longitude pairs.  Scaling the
@@ -136,17 +136,18 @@ def _catmull_rom_local_line(coordinates):
     subsequent airspace check.
     """
     synthetic = [[y / 111_132.92, x / 111_319.49] for x, y in coordinates]
-    smoothed = centripetal_catmull_rom_route(synthetic, samples_per_segment=20)
+    smoother = cubic_bezier_route if approximation == "cubic_bezier" else centripetal_catmull_rom_route
+    smoothed = smoother(synthetic, samples_per_segment=20)
     return LineString([(lon * 111_319.49, lat * 111_132.92) for lat, lon in smoothed])
 
 
-def _smooth_connection_is_safe(previous_coordinates, following_coordinates, allowed, blocked):
+def _smooth_connection_is_safe(previous_coordinates, following_coordinates, allowed, blocked, approximation="catmull_rom"):
     """Check a new join with its two Catmull-Rom control points on each side."""
     context = list(previous_coordinates[-2:]) + list(following_coordinates[:2])
-    return len(context) < 3 or _inside_allowed(_catmull_rom_local_line(context), allowed, blocked)
+    return len(context) < 3 or _inside_allowed(_smoothed_local_line(context, approximation), allowed, blocked)
 
 
-def _smooth_connection_helpers(previous_coordinates, following_coordinates, allowed, blocked):
+def _smooth_connection_helpers(previous_coordinates, following_coordinates, allowed, blocked, approximation="catmull_rom"):
     """Find one local steering point when a smooth join would graze a zone."""
     start, end = previous_coordinates[-1], following_coordinates[0]
     candidates = []
@@ -170,7 +171,7 @@ def _smooth_connection_helpers(previous_coordinates, following_coordinates, allo
         connector = LineString([start, *steering_points, end])
         context = list(previous_coordinates[-2:]) + steering_points + list(following_coordinates[:2])
         if _inside_allowed(connector, allowed, blocked) and _inside_allowed(
-            _catmull_rom_local_line(context), allowed, blocked
+            _smoothed_local_line(context, approximation), allowed, blocked
         ):
             return steering_points
     return None
@@ -579,6 +580,9 @@ def plan_poi_route(
     no_fly_strategy="adapt", outside_strategy="adapt", safety_margin_m=2.0,
     contour_boundary_clearance_m=1.5,
     contour_support_spacing_m=None,
+    smoothing_approximation="catmull_rom",
+    level_transition_mode="Standard",
+    level_transition_support_spacing_m=2.0,
     no_fly_heights_m=None,
     top_down_roof_scan=False,
     top_down_overshoot_m=0.0,
@@ -603,6 +607,8 @@ def plan_poi_route(
         raise POIPlanningError("Die POI-Sperrgebietsstrategie ist ungültig.")
     if outside_strategy not in {"allow", "adapt", "skip"}:
         raise POIPlanningError("Die POI-Flugbereichsstrategie ist ungültig.")
+    if smoothing_approximation not in {"catmull_rom", "cubic_bezier"}:
+        raise POIPlanningError("Die gewählte Flugbahn-Approximation ist ungültig.")
     allowed = None if outside_strategy == "allow" else unary_union(
         [_local_geometry(area, origin_lat, origin_lon) for area in flight_areas]
     )
@@ -751,10 +757,10 @@ def plan_poi_route(
                 if previous_altitude is None or min(previous_altitude, altitude) <= height + 0.5
             ]
             if previous_coordinates and not _smooth_connection_is_safe(
-                previous_coordinates, band_coordinates, allowed, connection_blocked
+                previous_coordinates, band_coordinates, allowed, connection_blocked, smoothing_approximation
             ):
                 transition_coordinates = _smooth_connection_helpers(
-                    previous_coordinates, band_coordinates, allowed, connection_blocked
+                    previous_coordinates, band_coordinates, allowed, connection_blocked, smoothing_approximation
                 )
                 # A separate mission is the last resort.  Normally a single
                 # local steering point retains the merged POI height bands.
@@ -800,10 +806,10 @@ def plan_poi_route(
                 if previous_altitude is None or min(previous_altitude, roof_altitude) <= height + 0.5
             ]
             if previous_coordinates and not _smooth_connection_is_safe(
-                previous_coordinates, roof_coordinates, allowed, connection_blocked
+                previous_coordinates, roof_coordinates, allowed, connection_blocked, smoothing_approximation
             ):
                 transition_coordinates = _smooth_connection_helpers(
-                    previous_coordinates, roof_coordinates, allowed, connection_blocked
+                    previous_coordinates, roof_coordinates, allowed, connection_blocked, smoothing_approximation
                 )
                 transition = transition_coordinates is None
                 if transition:
@@ -867,7 +873,36 @@ def plan_poi_route(
         raise POIPlanningError(
             "Für den Top-Down-Dachscan muss die Maximalflughöhe mindestens Objekthöhe plus Objektabstand erreichen."
         )
+    if level_transition_mode == "Stützpunkte":
+        levels = _add_level_transition_support_points(levels, separate_before, level_transition_support_spacing_m)
     return POIRoutePlan(tuple(levels), spacing, tuple(separate_before))
+
+
+def _add_level_transition_support_points(levels, separate_before, spacing_m):
+    """Add two on-path controllers before and after every connected level change."""
+    result = [list(level) for level in levels]
+    spacing_m = max(0.1, float(spacing_m))
+    for index in range(len(result) - 1):
+        if index + 1 < len(separate_before) and separate_before[index + 1]:
+            continue
+        previous, following = result[index], result[index + 1]
+        if len(previous) < 2 or len(following) < 2:
+            continue
+        def fraction(a, b):
+            distance = math.hypot((a.lat - b.lat) * 111_132.92, (a.lon - b.lon) * 111_319.49)
+            return min(0.45, spacing_m / max(distance, 0.01))
+        def between(a, b, factor, level):
+            return POIWaypoint(a.lat + (b.lat - a.lat) * factor, a.lon + (b.lon - a.lon) * factor,
+                               a.altitude_m + (b.altitude_m - a.altitude_m) * factor,
+                               a.gimbal_pitch_deg + (b.gimbal_pitch_deg - a.gimbal_pitch_deg) * factor,
+                               a.yaw_deg + (b.yaw_deg - a.yaw_deg) * factor, level, "transition")
+        tail_fraction = fraction(previous[-2], previous[-1])
+        head_fraction = fraction(following[0], following[1])
+        # Four additional controllers: two immediately before the old level's
+        # endpoint and two after the new level's start point.
+        result[index] = previous[:-1] + [between(previous[-2], previous[-1], 1 - 2 * tail_fraction, previous[-1].level), between(previous[-2], previous[-1], 1 - tail_fraction, previous[-1].level), previous[-1]]
+        result[index + 1] = [following[0], between(following[0], following[1], head_fraction, following[0].level), between(following[0], following[1], 2 * head_fraction, following[0].level)] + following[1:]
+    return result
 
 
 __all__ = ["POIPlanningError", "POIRoutePlan", "POIWaypoint", "plan_poi_route"]

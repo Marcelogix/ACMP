@@ -356,6 +356,36 @@ def centripetal_catmull_rom_route(route, samples_per_segment=12):
             result.append([latitude_origin + point[1] / latitude_scale, longitude_origin + point[0] / longitude_scale])
     result.append(route[-1][:])
     return result
+
+def cubic_bezier_route(route, samples_per_segment=12):
+    """Return a cubic-Bézier route through the controller waypoints.
+
+    The handles are the standard cardinal/Catmull-Rom handles.  Unlike the
+    centripetal variant this is an explicit cubic Bézier approximation, which
+    is useful when comparing both common DJI-path estimates.
+    """
+    if len(route) < 3:
+        return [point[:] for point in route]
+    latitude_origin = sum(point[0] for point in route) / len(route)
+    longitude_origin = sum(point[1] for point in route) / len(route)
+    latitude_scale = 111_132.92
+    longitude_scale = 111_319.49 * math.cos(math.radians(latitude_origin))
+    points = [((lon - longitude_origin) * longitude_scale, (lat - latitude_origin) * latitude_scale) for lat, lon in route]
+    result = []
+    samples = max(2, int(samples_per_segment))
+    for index, p1 in enumerate(points[:-1]):
+        p2 = points[index + 1]
+        p0 = points[index - 1] if index else (2 * p1[0] - p2[0], 2 * p1[1] - p2[1])
+        p3 = points[index + 2] if index + 2 < len(points) else (2 * p2[0] - p1[0], 2 * p2[1] - p1[1])
+        c1 = (p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6)
+        c2 = (p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6)
+        for sample in range(samples):
+            t = sample / samples; inverse = 1 - t
+            x = inverse**3 * p1[0] + 3 * inverse**2 * t * c1[0] + 3 * inverse * t**2 * c2[0] + t**3 * p2[0]
+            y = inverse**3 * p1[1] + 3 * inverse**2 * t * c1[1] + 3 * inverse * t**2 * c2[1] + t**3 * p2[1]
+            result.append([latitude_origin + y / latitude_scale, longitude_origin + x / longitude_scale])
+    result.append(route[-1][:])
+    return result
 def shortest_route_direction_deg(points,spacing_m,no_fly_zones=None): return min(range(180),key=lambda x:route_length_m(generate_lawnmower_route(points,spacing_m,x,no_fly_zones))) if len(points)>=3 else 0
 def plan_missions(route,max_points,max_seconds,speed_mps,mode,turn_delay_s=0):
     if len(route)<2:return []
@@ -370,7 +400,7 @@ def plan_missions(route,max_points,max_seconds,speed_mps,mode,turn_delay_s=0):
     return result+[current] if len(current)>=2 else result
 
 __all__ = [
-    "add_overshoot_turns", "centripetal_catmull_rom_route", "count_direction_changes", "densify_route", "estimated_route_seconds",
+    "add_overshoot_turns", "centripetal_catmull_rom_route", "cubic_bezier_route", "count_direction_changes", "densify_route", "estimated_route_seconds",
     "generate_lawnmower_route", "optimal_direction_deg", "plan_missions",
     "polygon_area_m2", "route_length_m", "shortest_route_direction_deg",
 ]
